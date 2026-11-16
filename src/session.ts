@@ -633,6 +633,9 @@ export class Session {
   /**
    * Reports a task the User couldn't do (spec 9.3), with the Session header and no access token. Resolves
    * with an alternative if the Company says the task can be done after all, else undefined.
+   *
+   * Read {@link taskCoverage} first: spec 9.3 asks the agent not to report a task the Company already
+   * lists as excluded, and this method sends the report either way.
    */
   async sendFeedback(report: FeedbackReport): Promise<Alternative | undefined> {
     // Likewise, 0.3 names the feedback endpoint in `poppy.json` (spec 9.3).
