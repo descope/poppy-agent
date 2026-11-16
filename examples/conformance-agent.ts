@@ -125,9 +125,14 @@ async function run(step: Step): Promise<void> {
       // 0.3 reads the excluded tasks document; 0.4 gets all three from tasks.endpoint (spec 9).
       await ready().session.taskCoverage();
       return;
-    case "report_task":
-      await ready().session.sendFeedback({ task: step.task, description: step.description });
+    case "report_task": {
+      const { session } = ready();
+      // The Company already said it doesn't offer these, so a report is noise (spec 9.3).
+      const { excludedTasks } = await session.taskCoverage();
+      if (excludedTasks.some((excluded) => excluded.task === step.task)) return;
+      await session.sendFeedback({ task: step.task, description: step.description });
       return;
+    }
     case "join_browser": {
       const { company: c, session: s } = ready();
       const endpoint = c.browserSessionEndpoint;

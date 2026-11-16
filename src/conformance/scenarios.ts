@@ -415,8 +415,44 @@ export const SCENARIOS: readonly ScenarioDefinition[] = [
       discover,
       { action: "task_coverage" },
       { action: "new_session" },
+      // A request under the new Session, so the Company sees it exists whether or not it asks for
+      // coverage again. Without it, an agent that reuses the first answer is simply invisible.
+      orders,
       { action: "task_coverage" },
     ],
+    evaluate: (c) => c.checkTaskCoverage(),
+  },
+  {
+    name: "excluded-task-report",
+    description: "A report is asked for on a task the Company already lists as excluded.",
+    suite: "interactions",
+    company: {},
+    steps: [
+      discover,
+      { action: "task_coverage" },
+      {
+        action: "report_task",
+        task: "Send a wire transfer",
+        description: "No API or conversation offered a way to send a wire transfer.",
+      },
+    ],
+    evaluate: (c) => c.checkExcludedReport(),
+  },
+  {
+    name: "v04-excluded-task-report",
+    description: "0.4: the same, where the excluded list came from this Session's tasks endpoint.",
+    suite: "interactions",
+    company: { version: "0.4" },
+    steps: [
+      discover,
+      { action: "task_coverage" },
+      {
+        action: "report_task",
+        task: "Send a wire transfer",
+        description: "No API or conversation offered a way to send a wire transfer.",
+      },
+    ],
+    evaluate: (c) => c.checkExcludedReport(),
   },
   {
     name: "conversation-approval",

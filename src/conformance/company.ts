@@ -1080,8 +1080,38 @@ export class ConformanceCompany {
     const polled = this.requests.some(
       (r) => `${r.url.origin}${r.url.pathname}` === TOKEN && r.body.includes("device_code"),
     );
+    // An agent that never asked for a device code never polls one either, so it has shown
+    // nothing about the rule. That is a skip, not a pass.
+    const started = this.requests.some(
+      (r) => r.method === "POST" && `${r.url.origin}${r.url.pathname}` === `${ORIGIN}/oauth/device`,
+    );
     // Refusing to show the link means never getting a token from it.
-    if (!polled) this.pass("oauth.device-link");
+    if (started && !polled) this.pass("oauth.device-link");
+  }
+
+  /**
+   * Called by the runner after a scenario that opens a second Session (spec section 9). Reusing the
+   * first Session's answer is the violation, and it is invisible in the requests: the second Session
+   * simply never asks. Only the absence can report it, so the runner asks at the end.
+   */
+  checkTaskCoverage(): void {
+    if (this.version === "0.3") return;
+    const sids = new Set(this.requests.map((r) => this.#sidOf(r)).filter((sid) => sid !== ""));
+    // Without a second Session the scenario never happened, and the check stays unexercised.
+    if (sids.size < 2 || this.#taskSids.size === 0) return;
+    if (this.#taskSids.size === 1)
+      this.fail("tasks.per-session", "a second Session reused the first Session's task coverage");
+  }
+
+  /**
+   * Called by the runner after a scenario that asks for a report on an excluded task (spec 9.3). An
+   * agent that honours the list sends nothing, so, as above, only the runner can see it did.
+   */
+  checkExcludedReport(): void {
+    const reported = this.requests.some(
+      (r) => r.method === "POST" && `${r.url.origin}${r.url.pathname}` === FEEDBACK,
+    );
+    if (!reported) this.pass("tasks.not-excluded");
   }
 
   /** Called by the runner after a version_mismatch scenario (spec 8.13). */
@@ -1160,6 +1190,32 @@ export class ConformanceCompany {
   #listedExtensions(): Record<string, unknown> {
     const listed = this.#document(this.version)["extensions"];
     return typeof listed === "object" && listed !== null ? (listed as Record<string, unknown>) : {};
+  }
+
+  /**
+   * The version a request declares for `name` in Poppy-Extensions, or undefined when it declares
+   * none. The member shape is already checked by `extensions.declared`; this reads the `v` of the
+   * one member that names this extension, rather than asking whether the name appears anywhere.
+   */
+  #declaredVersion(header: string, name: string): string | undefined {
+    for (const member of header.split(",")) {
+      const parsed = /^\s*"([^"]+)";v="([^"]+)"\s*$/.exec(member);
+      if (parsed?.[1] === name) return parsed[2];
+    }
+    return undefined;
+  }
+
+  /** The versions this Company lists for `name`: 0.3 lists one entry, 0.4 one per major (3.3). */
+  #listedVersions(name: string): string[] {
+    const entry = this.#listedExtensions()[name];
+    const entries = Array.isArray(entry) ? entry : [entry];
+    return entries.flatMap((one) =>
+      typeof one === "object" &&
+      one !== null &&
+      typeof (one as Record<string, unknown>)["version"] === "string"
+        ? [(one as Record<string, unknown>)["version"] as string]
+        : [],
+    );
   }
 
   /** The `sid` a request's Session header names, or "" when it carries none. */
@@ -1396,8 +1452,10 @@ export class ConformanceCompany {
         const listed = Object.keys(this.#listedExtensions());
         for (const name of Object.keys(content)) {
           // 0.3 reads the client's document, which this Company can't see here, so listing is the
-          // most it can check; 0.4 has the request itself say what it uses.
-          const usable = listed.includes(name) && (!isV4 || declared.includes(`"${name}"`));
+          // most it can check; 0.4 has the request itself say what it uses, at which version.
+          const version = this.#declaredVersion(declared, name);
+          const shared = version !== undefined && this.#listedVersions(name).includes(version);
+          const usable = listed.includes(name) && (!isV4 || shared);
           if (usable) this.pass("conversation.extension-version");
           else
             this.fail(

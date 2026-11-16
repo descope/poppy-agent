@@ -100,7 +100,11 @@ function sdkFactory(
         await ready().session.taskCoverage();
       },
       async reportTask(report) {
-        await ready().session.sendFeedback(report);
+        const { session } = ready();
+        // The Company already said it doesn't offer these, so a report is noise (spec 9.3).
+        const { excludedTasks } = await session.taskCoverage();
+        if (excludedTasks.some((excluded) => excluded.task === report.task)) return;
+        await session.sendFeedback(report);
       },
       async joinBrowser() {
         const { session: s } = ready();
