@@ -17,3 +17,5 @@ export type {
 } from "./run.ts";
 export { SCENARIOS, scenarioByName } from "./scenarios.ts";
 export type { ScenarioDefinition, Step, Suite } from "./scenarios.ts";
+export { checkSite, formatSiteReport } from "./site.ts";
+export type { SiteCheckOptions, SiteResult } from "./site.ts";
