@@ -386,9 +386,51 @@ describe("checkSite", () => {
       protocol_version: "9.9",
       supported_versions: { "0.4": `${ORIGIN}/poppy-0.4.json` },
     };
+    // `discover()` fetches the linked document, so a link to nothing is not a version on offer.
+    expect(byId(await check(documents), "discovery.version-supported")?.ok).toBe(false);
+
+    documents[`${ORIGIN}/poppy-0.4.json`] = { ...doc, protocol_version: "0.4" };
     const linked = await check(documents);
     expect(byId(linked, "discovery.version-supported")?.ok).toBe(true);
     expect(byId(linked, "discovery.version-current")?.ok).toBe(true);
+  });
+
+  it("drops a linked document that disagrees about its own version", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      protocol_version: "9.9",
+      supported_versions: { "0.4": `${ORIGIN}/poppy-0.4.json` },
+    };
+    documents[`${ORIGIN}/poppy-0.4.json`] = { ...doc, protocol_version: "0.3" };
+    expect(byId(await check(documents), "discovery.version-supported")?.ok).toBe(false);
+  });
+
+  it("checks an optional endpoint that is present, the way fetchOAuthServer does", async () => {
+    const documents = conformingSite();
+    documents[AS_METADATA] = issuerMetadata({
+      grant_types_supported: ["refresh_token"],
+      authorization_endpoint: "http://auth.test/oauth2/authorize",
+    });
+    const result = byId(await check(documents), "issuer.authorization-endpoint");
+    expect(result?.ok).toBe(false);
+    expect(result?.detail).toContain("not an https URL");
+  });
+
+  it("skips an API type the SDK ignores rather than failing the document", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      apis: [
+        { type: "graphql", url: "/graphql" },
+        { type: "mcp", url: MCP },
+      ],
+    };
+    const results = await check(documents);
+    expect(results.filter((result) => result.id.endsWith(":/graphql"))).toEqual([]);
+    expect(failures(results)).toEqual([]);
   });
 
   it("keeps an MCP URL's trailing slash, which its metadata is compared against verbatim", async () => {
@@ -441,6 +483,40 @@ describe("checkSite", () => {
       expect(byId(results, `api.prm:${DESCRIPTION}`)?.ok).toBe(true);
       expect(byId(results, `api.prm-resource:${DESCRIPTION}`)?.ok).toBe(true);
       expect(failures(results)).toEqual([]);
+    });
+
+    it("reports a servers URL that isn't one, instead of throwing", async () => {
+      const documents = withOpenApi();
+      documents[DESCRIPTION] = { servers: [{ url: "http://[" }] };
+      const results = await check(documents);
+      const result = byId(results, `api.servers:${DESCRIPTION}`);
+      expect(result?.ok).toBe(false);
+      // The findings gathered before it survive, which is the whole point.
+      expect(byId(results, "discovery.document")?.ok).toBe(true);
+    });
+
+    // `#lookup` passes `allowNotFound`, so only a 404 falls back to the default token.
+    it("does not read a 500 as the default-token fallback", async () => {
+      const documents = withOpenApi();
+      documents["https://api.shop.test/.well-known/oauth-protected-resource/v1"] = new Response(
+        "boom",
+        { status: 500 },
+      );
+      const result = byId(await check(documents), `api.prm:${DESCRIPTION}`);
+      expect(result?.ok).toBe(false);
+      expect(result?.level).toBe("MUST");
+    });
+
+    it("reports a resource mismatch at SHOULD, since agents fall back rather than fail", async () => {
+      const documents = withOpenApi();
+      documents["https://api.shop.test/.well-known/oauth-protected-resource/v1"] = {
+        resource: "https://api.shop.test/v2",
+        authorization_servers: [ISSUER],
+      };
+      const result = byId(await check(documents), `api.prm-resource:${DESCRIPTION}`);
+      expect(result?.ok).toBe(false);
+      expect(result?.level).toBe("SHOULD");
+      expect(result?.detail).toContain("default token");
     });
 
     it("reports a description that cannot be fetched", async () => {

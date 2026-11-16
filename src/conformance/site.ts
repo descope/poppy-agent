@@ -207,10 +207,22 @@ export async function checkSite(
       return false;
     }
   };
-  const offered = [
-    version,
-    ...Object.keys(linked).filter((listed) => onServingHost(linked[listed])),
-  ];
+  // `discover()` fetches a linked document and drops the version when it doesn't check out, so a
+  // link that 404s, isn't JSON, or disagrees about its own version is no version at all. Only the
+  // ones this SDK could choose are worth a request.
+  const reachable: string[] = [];
+  for (const [listed, url] of Object.entries(linked)) {
+    if (!SUPPORTED_PROTOCOL_VERSIONS.includes(listed) || !onServingHost(url)) continue;
+    const document = await get(ctx, new URL(String(url), final));
+    if (
+      document.status === 200 &&
+      document.json !== undefined &&
+      document.json["protocol_version"] === listed &&
+      document.json["supported_versions"] === undefined
+    )
+      reachable.push(listed);
+  }
+  const offered = [version, ...reachable];
   const choosable = offered.filter((listed) => SUPPORTED_PROTOCOL_VERSIONS.includes(listed));
   add(
     ctx,
@@ -460,9 +472,11 @@ export async function checkSite(
       );
       // `fetchOAuthServer` requires each of these and throws without them, so a site missing one
       // is unusable however complete the rest of the chain looks.
+      // `fetchOAuthServer` runs `httpsUrl` when an endpoint is required OR present, so an
+      // optional endpoint spelled `http://` throws just as a missing required one does.
       const endpoint = (key: string, id: string, why: string, required: boolean): void => {
-        if (!required) return;
         const value = issuerMeta.json?.[key];
+        if (!required && value === undefined) return;
         const url = typeof value === "string" ? httpsOrUndefined(value) : undefined;
         add(
           ctx,
@@ -472,7 +486,9 @@ export async function checkSite(
           url !== undefined,
           url !== undefined
             ? `${key}: ${url.href}`
-            : `${key} ${value === undefined ? "absent" : `is not an https URL: ${String(value)}`} — ${why}`,
+            : `${key} ${
+                value === undefined ? `absent — ${why}` : `is not an https URL: ${String(value)}`
+              }`,
         );
       };
       endpoint("token_endpoint", "issuer.token-endpoint", "no token can be issued", true);
@@ -514,6 +530,9 @@ export async function checkSite(
     const declared = typeof api["url"] === "string" ? api["url"] : "";
     if (declared === "") continue;
     const type = api["type"];
+    // `parseApis` returns early for any other type, before it looks at the URL, so a Company can
+    // advertise a future API type without agents on this version caring (spec 7).
+    if (type !== "mcp" && type !== "openapi") continue;
     // `parseApis` puts every URL through `httpsUrl`, which has no base to resolve against, so a
     // relative URL is not an API an agent can reach — it is a document `discover()` throws on.
     const declaredUrl = httpsOrUndefined(declared);
@@ -544,16 +563,30 @@ export async function checkSite(
         outcome(declaredUrl, description),
       );
       if (!served) continue;
-      service = openApiServer(description.text ?? "", declaredUrl.href);
+      // `new URL(server, descriptionUrl)` sits outside `openApiServer`'s own try/catch, and
+      // `#loadOpenApiServers` catches the throw and drops the service rather than failing.
+      try {
+        service = openApiServer(description.text ?? "", declaredUrl.href);
+      } catch {
+        add(
+          ctx,
+          `api.servers:${declared}`,
+          "MUST",
+          "7",
+          false,
+          "the first servers entry is not a URL — agents drop this API",
+        );
+        continue;
+      }
     }
 
     const expected = String(resourceMetadataUrl(service));
     const atSpecPath = await get(ctx, expected);
     let metadata = atSpecPath.status === 200 ? atSpecPath.json : undefined;
-    if (metadata === undefined && type === "openapi") {
-      // An OpenAPI service without its own metadata is not broken: `#lookup` falls back to the
-      // Company's default token (spec 4.5). Reporting it as a MUST failure would make every
-      // working OpenAPI Company exit non-zero.
+    if (metadata === undefined && type === "openapi" && atSpecPath.status === 404) {
+      // An OpenAPI service without its own metadata is not broken: `#lookup` passes
+      // `allowNotFound` and falls back to the Company's default token (spec 4.5). Only on a 404
+      // though — it throws on a 500, a transport failure, or a body that isn't JSON.
       add(
         ctx,
         `api.prm:${declared}`,
@@ -604,13 +637,19 @@ export async function checkSite(
         ? metadata["resource"] === service
         : withoutTrailingSlashes(named) === withoutTrailingSlashes(service) ||
           named === resourceOrigin;
+    // Only MCP throws on a mismatch. From 0.4 `#lookup` reads a mismatching OpenAPI resource as
+    // absent and uses the default token, so it is worth reporting but it doesn't break the site.
     add(
       ctx,
       `api.prm-resource:${declared}`,
-      "MUST",
+      type === "mcp" ? "MUST" : "SHOULD",
       "RFC 9728 §3.3",
       matches,
-      `resource: ${named} (expected ${service})`,
+      matches
+        ? `resource: ${named}`
+        : `resource: ${named} (expected ${service})${
+            type === "mcp" ? "" : " — agents ignore it and use the Company's default token"
+          }`,
     );
 
     if (type === "mcp") {
