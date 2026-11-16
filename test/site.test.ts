@@ -4,6 +4,24 @@ import { checkSite, formatSiteReport, type SiteResult } from "../src/conformance
 const ORIGIN = "https://shop.test";
 const ISSUER = "https://auth.test/v1/apps/shop";
 const MCP = "https://mcp.shop.test/mcp";
+/** Where RFC 8414 puts the metadata for an issuer that lives under a path. */
+const AS_METADATA = "https://auth.test/.well-known/oauth-authorization-server/v1/apps/shop";
+
+/**
+ * The issuer metadata `fetchOAuthServer` accepts: it throws without a token or revocation
+ * endpoint, and without an authorization endpoint when `authorization_code` is listed.
+ */
+function issuerMetadata(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    issuer: ISSUER,
+    protected_resources: [ORIGIN],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    token_endpoint: "https://auth.test/oauth2/token",
+    revocation_endpoint: "https://auth.test/oauth2/revoke",
+    authorization_endpoint: "https://auth.test/oauth2/authorize",
+    ...overrides,
+  };
+}
 
 /** A site that satisfies every rule, as the starting point each case mutates. */
 function conformingSite(): Record<string, unknown> {
@@ -21,11 +39,7 @@ function conformingSite(): Record<string, unknown> {
     },
     // RFC 8414: the well-known segment goes between origin and path, so an issuer under a path
     // publishes here and not at `${ISSUER}/.well-known/...`.
-    "https://auth.test/.well-known/oauth-authorization-server/v1/apps/shop": {
-      issuer: ISSUER,
-      protected_resources: [ORIGIN],
-      grant_types_supported: ["authorization_code", "refresh_token"],
-    },
+    [AS_METADATA]: issuerMetadata(),
     "https://mcp.shop.test/.well-known/oauth-protected-resource/mcp": {
       resource: MCP,
       authorization_servers: [ISSUER],
@@ -33,19 +47,35 @@ function conformingSite(): Record<string, unknown> {
   };
 }
 
-/** Serves a fixture map; anything absent is a 404, as a real host would answer. */
-function serve(documents: Record<string, unknown>): typeof fetch {
+/**
+ * Serves a fixture map; anything absent is a 404, as a real host would answer. `redirects` moves a
+ * URL somewhere else and reports the destination as `response.url`, the way `redirect: "follow"`
+ * does — which is how the apex → www case gets exercised at all.
+ */
+function serve(
+  documents: Record<string, unknown>,
+  redirects: Record<string, string> = {},
+): typeof fetch {
   return (async (input: string | URL | Request) => {
-    const url = String(input);
+    const asked = String(input);
+    const url = redirects[asked] ?? asked;
     const body = documents[url];
-    if (body === undefined) return new Response("not found", { status: 404 });
-    if (body instanceof Response) return body.clone();
-    return Response.json(body, { headers: { "content-type": "application/json" } });
+    const response =
+      body === undefined
+        ? new Response("not found", { status: 404 })
+        : body instanceof Response
+          ? body.clone()
+          : Response.json(body, { headers: { "content-type": "application/json" } });
+    Object.defineProperty(response, "url", { value: url });
+    return response;
   }) as typeof fetch;
 }
 
-async function check(documents: Record<string, unknown>): Promise<SiteResult[]> {
-  return await checkSite("shop.test", { fetch: serve(documents) });
+async function check(
+  documents: Record<string, unknown>,
+  redirects: Record<string, string> = {},
+): Promise<SiteResult[]> {
+  return await checkSite("shop.test", { fetch: serve(documents, redirects) });
 }
 
 const byId = (results: SiteResult[], id: string): SiteResult | undefined =>
@@ -132,34 +162,33 @@ describe("checkSite", () => {
 
   it("catches an issuer the domain names but whose metadata doesn't name the domain back", async () => {
     const documents = conformingSite();
-    documents["https://auth.test/.well-known/oauth-authorization-server/v1/apps/shop"] = {
-      issuer: ISSUER,
-      protected_resources: ["https://other.test"],
-      grant_types_supported: ["authorization_code", "refresh_token"],
-    };
+    documents[AS_METADATA] = issuerMetadata({ protected_resources: ["https://other.test"] });
     const result = byId(await check(documents), "issuer.protected-resources");
     expect(result?.ok).toBe(false);
     expect(result?.detail).toContain("other.test");
   });
 
-  it("accepts an issuer that serves only the OpenID Connect discovery path", async () => {
+  // `fetchOAuthServer` fetches only the RFC 8414 URL. Reporting this as a pass would hand a site
+  // a green report for a chain every agent built on this SDK refuses.
+  it("reports an issuer that serves only the OpenID Connect path, and still reads it", async () => {
     const documents = conformingSite();
-    const metadata =
-      documents["https://auth.test/.well-known/oauth-authorization-server/v1/apps/shop"];
-    delete documents["https://auth.test/.well-known/oauth-authorization-server/v1/apps/shop"];
-    documents[`${ISSUER}/.well-known/openid-configuration`] = metadata;
+    delete documents[AS_METADATA];
+    documents[`${ISSUER}/.well-known/openid-configuration`] = issuerMetadata({
+      protected_resources: ["https://other.test"],
+    });
     const results = await check(documents);
-    expect(byId(results, "issuer.metadata")?.ok).toBe(true);
-    expect(failures(results)).toEqual([]);
+    const metadata = byId(results, "issuer.metadata");
+    expect(metadata?.ok).toBe(false);
+    expect(metadata?.detail).toContain("openid-configuration");
+    expect(metadata?.detail).toContain("RFC 8414");
+    // Found anyway, so what is inside it is still checked.
+    expect(byId(results, "issuer.protected-resources")?.ok).toBe(false);
+    expect(byId(results, "issuer.refresh-token")?.ok).toBe(true);
   });
 
   it("flags a refresh_token grant the issuer doesn't support", async () => {
     const documents = conformingSite();
-    documents["https://auth.test/.well-known/oauth-authorization-server/v1/apps/shop"] = {
-      issuer: ISSUER,
-      protected_resources: [ORIGIN],
-      grant_types_supported: ["authorization_code"],
-    };
+    documents[AS_METADATA] = issuerMetadata({ grant_types_supported: ["authorization_code"] });
     expect(byId(await check(documents), "issuer.refresh-token")?.ok).toBe(false);
   });
 
@@ -217,18 +246,221 @@ describe("checkSite", () => {
     expect(result?.detail).toContain(`expected ${MCP}`);
   });
 
-  it("checks an API URL given relative to the site", async () => {
+  // `parseApis` runs each URL through `httpsUrl`, which has no base: a relative one throws.
+  it("rejects an API URL given relative to the site", async () => {
     const documents = conformingSite();
     const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
     documents[`${ORIGIN}/.well-known/poppy.json`] = {
       ...doc,
       apis: [{ type: "mcp", url: "/mcp" }],
     };
-    documents[`${ORIGIN}/.well-known/oauth-protected-resource/mcp`] = {
-      resource: `${ORIGIN}/mcp`,
+    const result = byId(await check(documents), "api.url:/mcp");
+    expect(result?.ok).toBe(false);
+    expect(result?.detail).toContain("absolute https URL");
+  });
+
+  // Every check below this line pins a rule against what `discover()` actually does, because a
+  // green report for a site the SDK rejects is worse than no report at all.
+
+  it("reads the PRM and the issuer link against the host that served the document", async () => {
+    const WWW = "https://www.shop.test";
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${WWW}/.well-known/poppy.json`] = {
+      ...doc,
+      organization: { name: "Shop", domain: "www.shop.test" },
+    };
+    delete documents[`${ORIGIN}/.well-known/poppy.json`];
+    delete documents[`${ORIGIN}/.well-known/oauth-protected-resource`];
+    documents[`${WWW}/.well-known/oauth-protected-resource`] = {
+      resource: WWW,
+      authorization_servers: [ISSUER],
+    };
+    documents[AS_METADATA] = issuerMetadata({ protected_resources: [WWW] });
+    const results = await check(documents, {
+      [`${ORIGIN}/.well-known/poppy.json`]: `${WWW}/.well-known/poppy.json`,
+    });
+    expect(failures(results)).toEqual([]);
+  });
+
+  it("requires auth.issuer when the domain lists more than one server", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      auth: { scopes: { "orders:read": "See your orders" } },
+    };
+    documents[`${ORIGIN}/.well-known/oauth-protected-resource`] = {
+      resource: ORIGIN,
+      authorization_servers: [ISSUER, "https://auth.test/v1/apps/other"],
+    };
+    const result = byId(await check(documents), "prm.domain-names-issuer");
+    expect(result?.ok).toBe(false);
+    expect(result?.detail).toContain("auth.issuer is required");
+  });
+
+  it("accepts a single listed server with no auth.issuer, the way findIssuer does", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      auth: { scopes: { "orders:read": "See your orders" } },
+    };
+    expect(byId(await check(documents), "prm.domain-names-issuer")?.ok).toBe(true);
+  });
+
+  it("catches an issuer with no token endpoint, which the SDK throws on", async () => {
+    const documents = conformingSite();
+    const metadata = issuerMetadata();
+    delete metadata["token_endpoint"];
+    documents[AS_METADATA] = metadata;
+    const result = byId(await check(documents), "issuer.token-endpoint");
+    expect(result?.ok).toBe(false);
+    expect(result?.detail).toContain("absent");
+  });
+
+  it("requires the device endpoint only when the device grant is listed", async () => {
+    const documents = conformingSite();
+    documents[AS_METADATA] = issuerMetadata({
+      grant_types_supported: [
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:device_code",
+      ],
+    });
+    expect(byId(await check(documents), "issuer.device-endpoint")?.ok).toBe(false);
+    // Without the grant the endpoint is not required, so the rule isn't reported at all.
+    expect(byId(await check(conformingSite()), "issuer.device-endpoint")).toBeUndefined();
+  });
+
+  it("reports a malformed auth.issuer instead of throwing the report away", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      auth: { issuer: "auth.example.com" },
+    };
+    const results = await check(documents);
+    const result = byId(results, "issuer.url");
+    expect(result?.ok).toBe(false);
+    expect(result?.detail).toContain("auth.example.com");
+    // The point of the rule: the checks gathered before it survive.
+    expect(byId(results, "discovery.document")?.ok).toBe(true);
+  });
+
+  it("allows the plain extension names the protocol defines", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      extensions: { operations: [{ version: "2" }] },
+    };
+    const results = await check(documents);
+    expect(byId(results, "extensions.name:operations")?.ok).toBe(true);
+    expect(byId(results, "extensions.entries:operations")?.ok).toBe(true);
+  });
+
+  it("reads a 0.3 extension entry as the single object 0.3 spells it", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      protocol_version: "0.3",
+      extensions: { "shop.test/loyalty": { version: "1" } },
+    };
+    const results = await check(documents);
+    expect(byId(results, "extensions.entries:shop.test/loyalty")?.ok).toBe(true);
+    // 0.3 is still a version an agent speaks, so only the SHOULD about being current fails.
+    expect(byId(results, "discovery.version-supported")?.ok).toBe(true);
+    expect(byId(results, "discovery.version-current")?.ok).toBe(false);
+  });
+
+  it("fails a version no agent can speak, and accepts one reached through a link", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = { ...doc, protocol_version: "9.9" };
+    expect(byId(await check(documents), "discovery.version-supported")?.ok).toBe(false);
+
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      protocol_version: "9.9",
+      supported_versions: { "0.4": `${ORIGIN}/poppy-0.4.json` },
+    };
+    const linked = await check(documents);
+    expect(byId(linked, "discovery.version-supported")?.ok).toBe(true);
+    expect(byId(linked, "discovery.version-current")?.ok).toBe(true);
+  });
+
+  it("keeps an MCP URL's trailing slash, which its metadata is compared against verbatim", async () => {
+    const WITH_SLASH = `${MCP}/`;
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      apis: [{ type: "mcp", url: WITH_SLASH }],
+    };
+    documents["https://mcp.shop.test/.well-known/oauth-protected-resource/mcp"] = {
+      resource: WITH_SLASH,
       authorization_servers: [ISSUER],
     };
     expect(failures(await check(documents))).toEqual([]);
+  });
+
+  describe("an OpenAPI API", () => {
+    const DESCRIPTION = "https://api.shop.test/openapi.json";
+    const SERVER = "https://api.shop.test/v1";
+
+    function withOpenApi(): Record<string, unknown> {
+      const documents = conformingSite();
+      const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+      documents[`${ORIGIN}/.well-known/poppy.json`] = {
+        ...doc,
+        apis: [{ type: "openapi", url: DESCRIPTION }],
+      };
+      documents[DESCRIPTION] = { servers: [{ url: SERVER }] };
+      return documents;
+    }
+
+    // `#lookup` falls back to the Company's default token on a 404 here, so a MUST failure would
+    // make every working OpenAPI Company exit non-zero.
+    it("treats missing metadata as the default token rather than a failure", async () => {
+      const results = await check(withOpenApi());
+      const prm = byId(results, `api.prm:${DESCRIPTION}`);
+      expect(prm?.ok).toBe(true);
+      expect(prm?.detail).toContain("default token");
+      expect(failures(results)).toEqual([]);
+    });
+
+    it("looks for the metadata at the servers URL, not at the description", async () => {
+      const documents = withOpenApi();
+      documents["https://api.shop.test/.well-known/oauth-protected-resource/v1"] = {
+        resource: SERVER,
+        authorization_servers: [ISSUER],
+      };
+      const results = await check(documents);
+      expect(byId(results, `api.prm:${DESCRIPTION}`)?.ok).toBe(true);
+      expect(byId(results, `api.prm-resource:${DESCRIPTION}`)?.ok).toBe(true);
+      expect(failures(results)).toEqual([]);
+    });
+
+    it("reports a description that cannot be fetched", async () => {
+      const documents = withOpenApi();
+      delete documents[DESCRIPTION];
+      const result = byId(await check(documents), `api.description:${DESCRIPTION}`);
+      expect(result?.ok).toBe(false);
+      expect(result?.detail).toContain("404");
+    });
+  });
+
+  it("names the transport error and a non-JSON body rather than printing a bare status", async () => {
+    const documents = conformingSite();
+    documents["https://mcp.shop.test/.well-known/oauth-protected-resource/mcp"] = new Response(
+      "<html>sign in</html>",
+      { status: 200, headers: { "content-type": "text/html" } },
+    );
+    const result = byId(await check(documents), `api.prm:${MCP}`);
+    expect(result?.ok).toBe(false);
+    expect(result?.detail).toContain("(not a JSON object)");
   });
 });
 

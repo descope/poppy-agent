@@ -13,7 +13,15 @@
  * writes — safe to point at a production domain.
  */
 
-import { authorizationServerMetadataUrl, originOf, resourceMetadataUrl } from "../http.ts";
+import { DEVICE_CODE_GRANT, SUPPORTED_PROTOCOL_VERSIONS } from "../discovery.ts";
+import {
+  authorizationServerMetadataUrl,
+  httpsUrl,
+  originOf,
+  resourceMetadataUrl,
+  withoutTrailingSlashes,
+} from "../http.ts";
+import { openApiServer } from "../resources.ts";
 import type { Level } from "./checks.ts";
 
 /** One rule, checked against one site. */
@@ -36,6 +44,10 @@ export interface SiteCheckOptions {
 
 const WELL_KNOWN = "/.well-known/poppy.json";
 const PRM = "/.well-known/oauth-protected-resource";
+/** The newest version this SDK implements, which is the one an agent prefers (spec 3.4). */
+const NEWEST_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0] ?? "0.4";
+/** Plain names the protocol itself defines and this SDK reads (spec 3.3). */
+const PROTOCOL_EXTENSIONS = new Set(["operations", "mediated-sign-in", "ucp"]);
 
 interface Ctx {
   results: SiteResult[];
@@ -58,6 +70,8 @@ function add(
 interface Fetched {
   status: number;
   json?: Record<string, unknown> | undefined;
+  /** The raw body, for the OpenAPI descriptions that are YAML rather than JSON. */
+  text?: string;
   finalUrl: string;
   error?: string;
 }
@@ -67,6 +81,29 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+
+/**
+ * One line a reader can act on. A transport failure prints the reason rather than `→ 0`, and a
+ * body that parsed as something other than a JSON object says so rather than printing a bare 200.
+ */
+function outcome(url: string | URL, fetched: Fetched): string {
+  if (fetched.error !== undefined) return `${String(url)} → fetch failed: ${fetched.error}`;
+  const hint = fetched.json === undefined ? " (not a JSON object)" : "";
+  return `${String(url)} → ${fetched.status}${hint}`;
+}
+
+/**
+ * A URL the SDK would accept, or undefined. Every URL here comes out of a document the Company
+ * controls, so a malformed one is a finding to report, never a `TypeError` that throws away the
+ * results gathered so far (the whole point of this tool is a report for a misconfigured site).
+ */
+function httpsOrUndefined(value: string): URL | undefined {
+  try {
+    return httpsUrl(value, "url");
+  } catch {
+    return undefined;
+  }
+}
 
 /** A GET that never throws: a transport failure is a finding, not a crash. */
 async function get(ctx: Ctx, url: string | URL): Promise<Fetched> {
@@ -85,7 +122,7 @@ async function get(ctx: Ctx, url: string | URL): Promise<Fetched> {
     } catch {
       // A body that isn't a JSON object is reported by whichever check needed one.
     }
-    return { status: response.status, json, finalUrl: response.url || target };
+    return { status: response.status, json, text, finalUrl: response.url || target };
   } catch (error) {
     return {
       status: 0,
@@ -112,9 +149,15 @@ export async function checkSite(
     fetch: options.fetch ?? fetch,
     timeoutMs: options.timeoutMs ?? 15_000,
   };
-  const origin = /^https?:\/\//.test(input)
-    ? new URL(input).origin
-    : originOf(new URL(`https://${input}`).host);
+  let origin: string;
+  try {
+    origin = /^https?:\/\//.test(input)
+      ? new URL(input).origin
+      : originOf(new URL(`https://${input}`).host);
+  } catch {
+    add(ctx, "input.site", "MUST", "3.1", false, `${input} is not a domain or an origin`);
+    return ctx.results;
+  }
 
   // ---- the discovery document ---------------------------------------------------------------
   const discovery = await get(ctx, `${origin}${WELL_KNOWN}`);
@@ -124,9 +167,7 @@ export async function checkSite(
     "MUST",
     "3.1",
     discovery.status === 200 && discovery.json !== undefined,
-    discovery.error
-      ? `fetch failed: ${discovery.error}`
-      : `${origin}${WELL_KNOWN} → ${discovery.status}${discovery.json ? "" : " (not a JSON object)"}`,
+    outcome(`${origin}${WELL_KNOWN}`, discovery),
   );
   if (!servedDocument || discovery.json === undefined) return ctx.results;
   const doc = discovery.json;
@@ -153,17 +194,43 @@ export async function checkSite(
     /^\d+\.\d+$/.test(version),
     version ? `protocol_version: ${version}` : "protocol_version missing or not a string",
   );
-  // Before 1.0 a version needs an exact major.minor match, so a stale one is not a soft failure:
-  // an agent speaking 0.4 declines a 0.3 document outright rather than reading what it can.
+  // An agent takes the newest version it implements, from this document or from one that
+  // `supported_versions` links on the host that served this one (spec 3.4). So a version this SDK
+  // doesn't implement is only a failure when no link offers one that it does.
+  const linked = isObject(doc["supported_versions"]) ? doc["supported_versions"] : {};
+  const onServingHost = (url: unknown): boolean => {
+    if (typeof url !== "string") return false;
+    try {
+      const parsed = new URL(url, final);
+      return parsed.protocol === "https:" && parsed.host.toLowerCase() === final.host.toLowerCase();
+    } catch {
+      return false;
+    }
+  };
+  const offered = [
+    version,
+    ...Object.keys(linked).filter((listed) => onServingHost(linked[listed])),
+  ];
+  const choosable = offered.filter((listed) => SUPPORTED_PROTOCOL_VERSIONS.includes(listed));
+  add(
+    ctx,
+    "discovery.version-supported",
+    "MUST",
+    "3.4",
+    choosable.length > 0,
+    choosable.length > 0
+      ? `an agent can speak ${choosable.join(", ")}`
+      : `offers ${offered.filter(Boolean).join(", ") || "(nothing)"} — this SDK speaks ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}`,
+  );
   add(
     ctx,
     "discovery.version-current",
     "SHOULD",
     "3.4",
-    version === "0.4",
-    version === "0.4"
+    choosable.includes(NEWEST_VERSION),
+    choosable.includes(NEWEST_VERSION)
       ? "current"
-      : `${version || "(none)"} — agents on 0.4 will decline this document`,
+      : `${version || "(none)"} — agents prefer ${NEWEST_VERSION}, which this site doesn't offer`,
   );
 
   const organization = isObject(doc["organization"]) ? doc["organization"] : {};
@@ -219,42 +286,59 @@ export async function checkSite(
       : "auth.scopes absent — the user reads these when approving",
   );
 
-  // Plain names are reserved for the protocol; anyone else prefixes with a domain they own, and
-  // each entry is a list with one object per major version of the extension.
+  // Plain names are reserved for the protocol, which defines the few in PROTOCOL_EXTENSIONS;
+  // anyone else prefixes with a domain they own. From 0.4 an entry is a list with one object per
+  // major version, while 0.3 spells the same thing as a single object, and `parseExtensions`
+  // still reads it that way — so the shape to require depends on the version.
   const extensions = isObject(doc["extensions"]) ? doc["extensions"] : {};
+  const wantsList = version !== "0.3";
   for (const [extension, entry] of Object.entries(extensions)) {
+    const prefixed = extension.includes("/");
+    const reserved = PROTOCOL_EXTENSIONS.has(extension);
     add(
       ctx,
       `extensions.name:${extension}`,
       "MUST",
       "3.3",
-      extension.includes("/"),
-      extension.includes("/")
+      prefixed || reserved,
+      prefixed
         ? `${extension} is domain-prefixed`
-        : `${extension} has no domain prefix — plain names are reserved for the protocol`,
+        : reserved
+          ? `${extension} is defined by the protocol`
+          : `${extension} has no domain prefix — plain names are reserved for the protocol`,
     );
+    const shaped = wantsList ? Array.isArray(entry) : isObject(entry);
     add(
       ctx,
       `extensions.entries:${extension}`,
       "MUST",
       "3.3",
-      Array.isArray(entry),
-      Array.isArray(entry)
-        ? `${entry.length} version ${entry.length === 1 ? "entry" : "entries"}`
-        : "not a list of per-version entries",
+      shaped,
+      shaped
+        ? wantsList
+          ? `${(entry as unknown[]).length} version ${(entry as unknown[]).length === 1 ? "entry" : "entries"}`
+          : "one entry, as 0.3 spells it"
+        : wantsList
+          ? "not a list of per-version entries"
+          : "not an entry object — 0.3 maps a name to one entry",
     );
   }
 
   // ---- the domain's own protected resource metadata ------------------------------------------
+  // Everything from here is keyed to the host that FINALLY served poppy.json, because that is the
+  // domain the document speaks for and the one `discover()` carries into the issuer lookup. Using
+  // the host that was asked would give a site redirecting apex → www a MUST failure for a chain
+  // that is set up correctly, and would check a PRM no agent ever reads.
+  const resourceOrigin = originOf(final.host);
   const declaredIssuer = typeof auth["issuer"] === "string" ? auth["issuer"] : "";
-  const domainPrm = await get(ctx, `${origin}${PRM}`);
+  const domainPrm = await get(ctx, `${resourceOrigin}${PRM}`);
   const servedDomainPrm = add(
     ctx,
     "prm.domain",
     "MUST",
     "3.2",
     domainPrm.status === 200 && domainPrm.json !== undefined,
-    `${origin}${PRM} → ${domainPrm.status}${
+    `${outcome(`${resourceOrigin}${PRM}`, domainPrm)}${
       domainPrm.status === 404 ? ' (an agent reads this as "no issuer")' : ""
     }`,
   );
@@ -268,18 +352,26 @@ export async function checkSite(
       "prm.domain-resource",
       "MUST",
       "3.2",
-      domainPrm.json["resource"] === origin,
-      `resource: ${String(domainPrm.json["resource"])} (expected ${origin})`,
+      domainPrm.json["resource"] === resourceOrigin,
+      `resource: ${String(domainPrm.json["resource"])} (expected ${resourceOrigin})`,
     );
     authorizationServers = strings(domainPrm.json["authorization_servers"]);
+    // `findIssuer` takes the single listed server when `auth.issuer` is absent, but refuses to
+    // guess between several. So silence is fine with one server and a failure with more.
+    const namesIssuer =
+      declaredIssuer === ""
+        ? authorizationServers.length <= 1
+        : authorizationServers.includes(declaredIssuer);
     add(
       ctx,
       "prm.domain-names-issuer",
       "MUST",
       "3.1",
-      declaredIssuer === "" || authorizationServers.includes(declaredIssuer),
+      namesIssuer,
       declaredIssuer === ""
-        ? "auth.issuer absent, which is allowed when the metadata names one server"
+        ? authorizationServers.length <= 1
+          ? "auth.issuer absent, which is allowed when the metadata names one server"
+          : `authorization_servers lists ${authorizationServers.length} servers, so auth.issuer is required`
         : `authorization_servers ${
             authorizationServers.includes(declaredIssuer) ? "includes" : "does NOT include"
           } ${declaredIssuer}`,
@@ -288,18 +380,33 @@ export async function checkSite(
 
   // ---- the issuer's side of the same link ----------------------------------------------------
   const issuer = declaredIssuer || authorizationServers[0] || "";
-  if (issuer !== "") {
+  const issuerUrl = issuer === "" ? undefined : httpsOrUndefined(issuer);
+  if (issuer !== "" && issuerUrl === undefined) {
+    add(
+      ctx,
+      "issuer.url",
+      "MUST",
+      "3.2",
+      false,
+      `${issuer} is not an https URL — agents reject the Company before any sign-in`,
+    );
+  } else if (issuerUrl !== undefined) {
     // RFC 8414 puts the well-known segment between origin and path, which matters because most
-    // hosted issuers live under one. OpenID Connect Discovery's suffix form is also standard and
-    // widely served, so a site answering only there is interoperable, not broken.
-    let issuerMeta = await get(ctx, authorizationServerMetadataUrl(issuer));
-    let issuerMetaUrl = String(authorizationServerMetadataUrl(issuer));
+    // hosted issuers live under one.
+    const specPath = authorizationServerMetadataUrl(issuer);
+    let issuerMeta = await get(ctx, specPath);
+    let issuerMetaUrl = String(specPath);
+    let atOpenIdOnly = false;
     if (issuerMeta.status !== 200 || issuerMeta.json === undefined) {
-      const suffix = `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
+      // OpenID Connect Discovery's suffix form is widely served, so look there before giving up —
+      // but it is a finding, not a pass: `fetchOAuthServer` fetches only the RFC 8414 URL, so an
+      // issuer answering solely here is one every agent built on this SDK refuses.
+      const suffix = `${withoutTrailingSlashes(issuer)}/.well-known/openid-configuration`;
       const openid = await get(ctx, suffix);
       if (openid.status === 200 && openid.json !== undefined) {
         issuerMeta = openid;
         issuerMetaUrl = suffix;
+        atOpenIdOnly = true;
       }
     }
     const servedIssuerMeta = add(
@@ -307,11 +414,15 @@ export async function checkSite(
       "issuer.metadata",
       "MUST",
       "3.2",
-      issuerMeta.status === 200 && issuerMeta.json !== undefined,
-      `${issuerMetaUrl} → ${issuerMeta.status}`,
+      !atOpenIdOnly && issuerMeta.status === 200 && issuerMeta.json !== undefined,
+      atOpenIdOnly
+        ? `found at ${issuerMetaUrl} instead of ${String(specPath)} — agents fetch only the RFC 8414 URL`
+        : outcome(specPath, issuerMeta),
     );
 
-    if (servedIssuerMeta && issuerMeta.json !== undefined) {
+    if (issuerMeta.json !== undefined && (servedIssuerMeta || atOpenIdOnly)) {
+      // The contents still get checked even when the path was wrong, so the report doesn't stop
+      // at the path problem and hide whatever else is wrong inside the document.
       add(
         ctx,
         "issuer.identifier",
@@ -321,16 +432,21 @@ export async function checkSite(
         `issuer: ${String(issuerMeta.json["issuer"])} (expected ${issuer})`,
       );
       // The issuer confirms the link from its own side. Without it, a domain could name an
-      // issuer that has never heard of it and agents would have no way to tell.
+      // issuer that has never heard of it and agents would have no way to tell. RFC 9728 §3.3
+      // compares the host case-insensitively and allows no path, which is what `listsDomain` does.
       const protectedResources = strings(issuerMeta.json["protected_resources"]);
+      const namesDomain = protectedResources.some((entry) => {
+        const match = /^https:\/\/([^/?#:@]+)$/i.exec(entry);
+        return match?.[1]?.toLowerCase() === final.host.toLowerCase();
+      });
       add(
         ctx,
         "issuer.protected-resources",
         "MUST",
         "3.2",
-        protectedResources.includes(origin),
+        namesDomain,
         protectedResources.length > 0
-          ? `protected_resources: ${protectedResources.join(", ")}`
+          ? `protected_resources: ${protectedResources.join(", ")} (expected ${resourceOrigin})`
           : "protected_resources absent",
       );
       const grants = strings(issuerMeta.json["grant_types_supported"]);
@@ -341,6 +457,42 @@ export async function checkSite(
         "4.4",
         grants.includes("refresh_token"),
         `grant_types_supported: ${grants.join(", ") || "(absent)"}`,
+      );
+      // `fetchOAuthServer` requires each of these and throws without them, so a site missing one
+      // is unusable however complete the rest of the chain looks.
+      const endpoint = (key: string, id: string, why: string, required: boolean): void => {
+        if (!required) return;
+        const value = issuerMeta.json?.[key];
+        const url = typeof value === "string" ? httpsOrUndefined(value) : undefined;
+        add(
+          ctx,
+          id,
+          "MUST",
+          "3.2",
+          url !== undefined,
+          url !== undefined
+            ? `${key}: ${url.href}`
+            : `${key} ${value === undefined ? "absent" : `is not an https URL: ${String(value)}`} — ${why}`,
+        );
+      };
+      endpoint("token_endpoint", "issuer.token-endpoint", "no token can be issued", true);
+      endpoint(
+        "revocation_endpoint",
+        "issuer.revocation-endpoint",
+        "sign-out has nowhere to revoke",
+        true,
+      );
+      endpoint(
+        "authorization_endpoint",
+        "issuer.authorization-endpoint",
+        "authorization_code is listed as a grant",
+        grants.includes("authorization_code"),
+      );
+      endpoint(
+        "device_authorization_endpoint",
+        "issuer.device-endpoint",
+        "the device code grant is listed",
+        grants.includes(DEVICE_CODE_GRANT),
       );
     }
   }
@@ -361,20 +513,64 @@ export async function checkSite(
   for (const api of apis) {
     const declared = typeof api["url"] === "string" ? api["url"] : "";
     if (declared === "") continue;
-    // The resource identifier is the URL with no trailing slash: it is compared verbatim against
-    // what the metadata returns and against a token's `aud`, so the two must be spelled alike.
-    const resource = new URL(declared, origin).toString().replace(/\/+$/, "");
-    const expected = String(resourceMetadataUrl(resource));
+    const type = api["type"];
+    // `parseApis` puts every URL through `httpsUrl`, which has no base to resolve against, so a
+    // relative URL is not an API an agent can reach — it is a document `discover()` throws on.
+    const declaredUrl = httpsOrUndefined(declared);
+    if (declaredUrl === undefined) {
+      add(
+        ctx,
+        `api.url:${declared}`,
+        "MUST",
+        "3.1",
+        false,
+        `${declared} is not an absolute https URL — agents refuse the whole document`,
+      );
+      continue;
+    }
 
+    // The resource an agent looks metadata up for. For MCP it is the API URL spelled exactly as
+    // published, trailing slash included, because `#lookup` compares it verbatim. For OpenAPI the
+    // URL is the description document, and the service is its first `servers` entry.
+    let service = declaredUrl.href;
+    if (type === "openapi") {
+      const description = await get(ctx, declaredUrl);
+      const served = add(
+        ctx,
+        `api.description:${declared}`,
+        "MUST",
+        "7",
+        description.status === 200 && (description.text ?? "") !== "",
+        outcome(declaredUrl, description),
+      );
+      if (!served) continue;
+      service = openApiServer(description.text ?? "", declaredUrl.href);
+    }
+
+    const expected = String(resourceMetadataUrl(service));
     const atSpecPath = await get(ctx, expected);
     let metadata = atSpecPath.status === 200 ? atSpecPath.json : undefined;
+    if (metadata === undefined && type === "openapi") {
+      // An OpenAPI service without its own metadata is not broken: `#lookup` falls back to the
+      // Company's default token (spec 4.5). Reporting it as a MUST failure would make every
+      // working OpenAPI Company exit non-zero.
+      add(
+        ctx,
+        `api.prm:${declared}`,
+        "SHOULD",
+        "RFC 9728 §3.1",
+        true,
+        `${outcome(expected, atSpecPath)} — agents use the Company's default token for ${service}`,
+      );
+      continue;
+    }
     add(
       ctx,
       `api.prm:${declared}`,
       "MUST",
       "RFC 9728 §3.1",
       metadata !== undefined,
-      `${expected} → ${atSpecPath.status}`,
+      outcome(expected, atSpecPath),
     );
 
     if (metadata === undefined) {
@@ -382,7 +578,7 @@ export async function checkSite(
       // the spec path usually means the document is one URL over rather than missing. That is a
       // path failure, and its CONTENTS still have to be checked — otherwise the report stops at
       // the path problem and hides whatever else is wrong inside the document.
-      const suffix = `${resource}${PRM}`;
+      const suffix = `${withoutTrailingSlashes(service)}${PRM}`;
       const atSuffix = await get(ctx, suffix);
       if (atSuffix.status === 200 && atSuffix.json !== undefined) {
         metadata = atSuffix.json;
@@ -399,16 +595,25 @@ export async function checkSite(
 
     if (metadata === undefined) continue;
 
+    // MCP compares verbatim; from 0.4 everything else compares ignoring trailing slashes, and a
+    // service naming the Company's own origin means "use the default token" rather than a
+    // mismatch (spec 4.5).
+    const named = String(metadata["resource"]);
+    const matches =
+      type === "mcp"
+        ? metadata["resource"] === service
+        : withoutTrailingSlashes(named) === withoutTrailingSlashes(service) ||
+          named === resourceOrigin;
     add(
       ctx,
       `api.prm-resource:${declared}`,
       "MUST",
       "RFC 9728 §3.3",
-      metadata["resource"] === resource,
-      `resource: ${String(metadata["resource"])} (expected ${resource})`,
+      matches,
+      `resource: ${named} (expected ${service})`,
     );
 
-    if (api["type"] === "mcp") {
+    if (type === "mcp") {
       // One Company, one identity namespace: an MCP server pointing somewhere else means a user
       // who signs in through the site is a different subject from the one the API sees.
       const servers = strings(metadata["authorization_servers"]);
