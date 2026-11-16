@@ -40,6 +40,8 @@ const DEVICE_CODE = "dc_conformance";
 const SIBLING = "https://shop.example";
 /** The tasks this Company says it doesn't offer, in both versions' documents (spec 9.1). */
 const EXCLUDED_TASKS = ["Send a wire transfer"];
+/** Where 0.3 serves that list as a public document; 0.4 serves it from {@link TASKS} (spec 9.1). */
+const EXCLUDED_TASKS_DOC = `${ORIGIN}/poppy/excluded-tasks.json`;
 
 /** Behaviors a scenario switches on, to see how the agent reacts. */
 export interface Scenario {
@@ -322,7 +324,7 @@ export class ConformanceCompany {
       version === "0.3"
         ? {
             feedback: { endpoint: FEEDBACK },
-            excluded_tasks: { url: `${ORIGIN}/poppy/excluded-tasks.json` },
+            excluded_tasks: { url: EXCLUDED_TASKS_DOC },
             skill_index: this.skillIndex(),
           }
         : { tasks: { endpoint: TASKS } };
@@ -441,7 +443,7 @@ export class ConformanceCompany {
         return json(200, this.poppyJson());
       case OTHER_VERSION_DOC:
         return json(200, this.#linkedDocument());
-      case `${ORIGIN}/poppy/excluded-tasks.json`:
+      case EXCLUDED_TASKS_DOC:
         // 0.3 serves excluded tasks as a public document, with no Session header (spec 9.1).
         if (headers.has("poppy-session"))
           this.fail(
@@ -1108,10 +1110,15 @@ export class ConformanceCompany {
    * agent that honours the list sends nothing, so, as above, only the runner can see it did.
    */
   checkExcludedReport(): void {
+    // An agent that never read the coverage can't have decided anything about it: not reporting is
+    // then silence, not restraint. Only an agent that read the list and held back has shown the rule.
+    const read = this.requests.some((r) =>
+      [EXCLUDED_TASKS_DOC, TASKS].includes(`${r.url.origin}${r.url.pathname}`),
+    );
     const reported = this.requests.some(
       (r) => r.method === "POST" && `${r.url.origin}${r.url.pathname}` === FEEDBACK,
     );
-    if (!reported) this.pass("tasks.not-excluded");
+    if (read && !reported) this.pass("tasks.not-excluded");
   }
 
   /** Called by the runner after a version_mismatch scenario (spec 8.13). */

@@ -234,6 +234,8 @@ describe("conformance suite", () => {
       "http.redirects": "fail",
       "oauth.direct-request": "skip",
       "conversation.messages": "skip",
+      // It never read the excluded list, so holding back says nothing about spec 9.3.
+      "tasks.not-excluded": "skip",
     });
     expect(formatReport(report)).toMatch(
       /^Personal Agent Protocol 0\.4 and 0\.3 conformance: \d+ passed, \d+ failed, \d+ skipped/,
