@@ -6,6 +6,8 @@ import {
   clientMetadata,
   jwks,
   operationFromResponse,
+  operatorKeyId,
+  type OperatorSignatureOptions,
   PoppyAgent,
   PoppyError,
   type PoppyUser,
@@ -20,6 +22,11 @@ async function identity() {
     "sign",
     "verify",
   ]);
+  // Web Bot Auth signs with Ed25519, separately from the keys that sign assertions (spec 5.3).
+  const operator = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
   const documents: Record<string, unknown> = {
     [CLIENT_ID]: clientMetadata({
       clientId: CLIENT_ID,
@@ -34,11 +41,22 @@ async function identity() {
     const body = documents[String(input)];
     return body === undefined ? new Response(null, { status: 404 }) : Response.json(body);
   }) as typeof fetch;
-  return { privateKey: pair.privateKey, agentFetch };
+  return {
+    privateKey: pair.privateKey,
+    agentFetch,
+    operatorSignature: {
+      privateKey: operator.privateKey,
+      keyId: await operatorKeyId(operator.publicKey),
+      signatureAgent: "https://agent.test/keys",
+    },
+  };
 }
 
 /** This SDK, driven through the suite's adapter interface. */
-function sdkFactory(privateKey: CryptoKey): AgentFactory {
+function sdkFactory(
+  privateKey: CryptoKey,
+  operatorSignature: OperatorSignatureOptions,
+): AgentFactory {
   return async ({ fetch }) => {
     const agent = new PoppyAgent({
       clientId: CLIENT_ID,
@@ -46,6 +64,7 @@ function sdkFactory(privateKey: CryptoKey): AgentFactory {
       fetch,
       redirectUri: "https://agent.test/callback",
       extensions: { operations: { version: "2" } },
+      operatorSignature,
     });
     let user: PoppyUser | undefined;
     let session: Session | undefined;
@@ -81,7 +100,11 @@ function sdkFactory(privateKey: CryptoKey): AgentFactory {
         await ready().session.taskCoverage();
       },
       async reportTask(report) {
-        await ready().session.sendFeedback(report);
+        const { session } = ready();
+        // The Company already said it doesn't offer these, so a report is noise (spec 9.3).
+        const { excludedTasks } = await session.taskCoverage();
+        if (excludedTasks.some((excluded) => excluded.task === report.task)) return;
+        await session.sendFeedback(report);
       },
       async joinBrowser() {
         const { session: s } = ready();
@@ -119,6 +142,47 @@ function sdkFactory(privateKey: CryptoKey): AgentFactory {
       async readSkill(name) {
         await ready().session.fetchSkill(name);
       },
+      async signInDevice(scope) {
+        const { user: u } = ready();
+        const started = await u.startDeviceSignIn({ scope });
+        // A real agent shows `verificationUri` and `userCode` with the Company's name and domain,
+        // which the SDK has already checked the host of (spec 4.3). Here the User simply approves.
+        await started.wait();
+      },
+      async newSession() {
+        const { user: u } = ready();
+        session = u.session();
+      },
+      async requestRateLimited(url) {
+        const { session: s } = ready();
+        const first = await s.fetch(url);
+        await first.body?.cancel();
+        if (first.status === 429) {
+          // Retry-After is a floor, not a suggestion (spec 5.6).
+          const seconds = Number(first.headers.get("retry-after") ?? 0);
+          await new Promise((resolve) => setTimeout(resolve, seconds * 1000 + 50));
+        }
+        const again = await s.fetch(url);
+        await again.body?.cancel();
+      },
+      async converseWithApproval(text) {
+        const { session: s } = ready();
+        const { conversation, update } = await s.conversations().start({ text }, { wait: 2 });
+        let events = update.events;
+        if (!events.some((e) => e.type === "message"))
+          events = (await conversation.readAll({ wait: 2 })).events;
+        const operation = events
+          .flatMap((e) =>
+            e.type === "message" && e.message.operation ? [e.message.operation] : [],
+          )
+          .at(-1);
+        if (operation === undefined) throw new Error("the Company Agent asked for no approval");
+        // The User approved; the approval travels in the message's extensions (spec 8.4).
+        await conversation.send({
+          text: "The user approved this.",
+          approval: approvalFor(operation),
+        });
+      },
       async requestWithApproval(url, init) {
         const { session: s } = ready();
         const refused = await s.fetch(url, init);
@@ -133,12 +197,13 @@ function sdkFactory(privateKey: CryptoKey): AgentFactory {
 
 describe("conformance suite", () => {
   it("passes this SDK on every check", async () => {
-    const { privateKey, agentFetch } = await identity();
-    const report = await runConformance(sdkFactory(privateKey), { agentFetch });
+    const { privateKey, agentFetch, operatorSignature } = await identity();
+    const report = await runConformance(sdkFactory(privateKey, operatorSignature), { agentFetch });
     const failed = report.results.filter((r) => r.status !== "pass");
     expect(failed, formatReport(report)).toEqual([]);
     expect(report.passed).toBe(report.results.length);
-  });
+    // The rate-limit scenario waits out a real Retry-After, so the suite outlives the 5s default.
+  }, 30_000);
 
   it("catches an agent that breaks the rules", async () => {
     const { agentFetch } = await identity();
@@ -169,6 +234,8 @@ describe("conformance suite", () => {
       "http.redirects": "fail",
       "oauth.direct-request": "skip",
       "conversation.messages": "skip",
+      // It never read the excluded list, so holding back says nothing about spec 9.3.
+      "tasks.not-excluded": "skip",
     });
     expect(formatReport(report)).toMatch(
       /^Personal Agent Protocol 0\.4 and 0\.3 conformance: \d+ passed, \d+ failed, \d+ skipped/,

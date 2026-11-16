@@ -34,6 +34,14 @@ const REVOKE = `${ORIGIN}/oauth/revoke`;
 const AUTHORIZE = `${ORIGIN}/oauth/authorize`;
 const OAUTH_ENDPOINTS = [TOKEN, REVOKE, `${ORIGIN}/oauth/device`];
 const ID = /^[A-Za-z0-9_-]{1,256}$/;
+/** The device code this Company issues; an agent that shows a bad link must never poll with it. */
+const DEVICE_CODE = "dc_conformance";
+/** Another domain on the same issuer, which 0.4 no longer accepts a sign-in link on (spec 4.3). */
+const SIBLING = "https://shop.example";
+/** The tasks this Company says it doesn't offer, in both versions' documents (spec 9.1). */
+const EXCLUDED_TASKS = ["Send a wire transfer"];
+/** Where 0.3 serves that list as a public document; 0.4 serves it from {@link TASKS} (spec 9.1). */
+const EXCLUDED_TASKS_DOC = `${ORIGIN}/poppy/excluded-tasks.json`;
 
 /** Behaviors a scenario switches on, to see how the agent reacts. */
 export interface Scenario {
@@ -82,6 +90,12 @@ export interface Scenario {
   expireTokensOnce?: boolean;
   /** The authorization response names another issuer in iss. */
   wrongIss?: boolean;
+  /** Device Sign-In answers with a verification link on a host the Company doesn't control. */
+  deviceLinkOffsite?: boolean;
+  /** The Company Agent asks for approval in a message, so a reply carries extension content. */
+  operationInConversation?: boolean;
+  /** The API rate-limits the first request, with Retry-After, before answering. */
+  rateLimitSeconds?: number;
 }
 
 interface Recorded {
@@ -89,6 +103,8 @@ interface Recorded {
   url: URL;
   headers: Headers;
   body: string;
+  /** When the Company saw it, which the rate-limit check measures against (spec 5.6). */
+  at: number;
 }
 
 interface Issued {
@@ -180,6 +196,8 @@ export class ConformanceCompany {
   #handoff: "none" | "pending" = "none";
   #reads = 0;
   #mismatches = 0;
+  readonly #rateLimited = new Map<string, number>();
+  readonly #taskSids = new Set<string>();
   #sessionErrors = 0;
   #versionErrors = 0;
   readonly #codes = new Map<string, { challenge: string; scope: string[]; redirectUri: string }>();
@@ -252,7 +270,7 @@ export class ConformanceCompany {
         : init.body instanceof URLSearchParams
           ? init.body.toString()
           : String(init.body);
-    const recorded = { method, url, headers, body };
+    const recorded = { method, url, headers, body, at: Date.now() };
     this.requests.push(recorded);
     this.#checkUrl(recorded);
     if (
@@ -306,7 +324,7 @@ export class ConformanceCompany {
       version === "0.3"
         ? {
             feedback: { endpoint: FEEDBACK },
-            excluded_tasks: { url: `${ORIGIN}/poppy/excluded-tasks.json` },
+            excluded_tasks: { url: EXCLUDED_TASKS_DOC },
             skill_index: this.skillIndex(),
           }
         : { tasks: { endpoint: TASKS } };
@@ -385,9 +403,19 @@ export class ConformanceCompany {
       token_endpoint: TOKEN,
       revocation_endpoint: REVOKE,
       authorization_endpoint: AUTHORIZE,
-      grant_types_supported: ["refresh_token", "authorization_code"],
+      // Required once grant_types_supported names the device grant (spec 3.2).
+      device_authorization_endpoint: `${ORIGIN}/oauth/device`,
+      grant_types_supported: [
+        "refresh_token",
+        "authorization_code",
+        "urn:ietf:params:oauth:grant-type:device_code",
+      ],
       scopes_supported: ["orders:read", "orders:write", BROWSER_SIGN_IN],
-      protected_resources: this.scenario.issuerUnlinked ? [MCP] : [ORIGIN, MCP],
+      protected_resources: this.scenario.issuerUnlinked
+        ? [MCP]
+        : this.scenario.deviceLinkOffsite === true
+          ? [ORIGIN, MCP, SIBLING]
+          : [ORIGIN, MCP],
       ...(this.scenario.dpop ? { dpop_signing_alg_values_supported: ["ES256"] } : {}),
     };
   }
@@ -415,16 +443,18 @@ export class ConformanceCompany {
         return json(200, this.poppyJson());
       case OTHER_VERSION_DOC:
         return json(200, this.#linkedDocument());
-      case `${ORIGIN}/poppy/excluded-tasks.json`:
+      case EXCLUDED_TASKS_DOC:
         // 0.3 serves excluded tasks as a public document, with no Session header (spec 9.1).
         if (headers.has("poppy-session"))
           this.fail(
             "session.destinations",
             "sent the Session header to the excluded tasks document",
           );
-        return json(200, { tasks: [{ task: "Send a wire transfer" }] });
+        return json(200, { tasks: EXCLUDED_TASKS.map((task) => ({ task })) });
       case TASKS:
-        return this.#resource(request, undefined, undefined, () => this.#tasks(request));
+        return this.#resource(request, undefined, undefined, () =>
+          this.#tasks(request, this.#sidOf(request)),
+        );
       case SKILL_URL:
         // A skill artifact is Company content: it carries no credential, wherever it lives (9.4).
         if (headers.has("poppy-session") || headers.has("authorization"))
@@ -456,6 +486,16 @@ export class ConformanceCompany {
           if (headers.has("authorization"))
             this.fail("tasks.feedback", "sent an access token with a feedback report");
           else this.pass("tasks.feedback");
+          let task: unknown;
+          try {
+            task = (JSON.parse(body || "{}") as Record<string, unknown>)["task"];
+          } catch {
+            return json(400, { error: "invalid_request" });
+          }
+          // The Company already knows it doesn't offer these, so a report is noise (spec 9.3).
+          if (EXCLUDED_TASKS.includes(String(task)))
+            this.fail("tasks.not-excluded", `reported a task listed as excluded: ${String(task)}`);
+          else this.pass("tasks.not-excluded");
           return new Response(null, { status: 202 });
         });
       case `${ORIGIN}/.well-known/oauth-protected-resource`:
@@ -469,6 +509,25 @@ export class ConformanceCompany {
           authorization_servers: [ISSUER],
           ...(this.scenario.dpop ? { dpop_signing_alg_values_supported: ["ES256"] } : {}),
         });
+      case `${ORIGIN}/oauth/device`: {
+        if (method !== "POST") return json(405, {});
+        if (!(await this.#clientAuth(new URLSearchParams(body))))
+          return json(401, { error: "invalid_client" });
+        // 0.4 narrows the link to the issuer's host or organization.domain, or a subdomain of
+        // either: a host from protected_resources no longer qualifies (spec 4.3).
+        // A host this issuer serves but the Company doesn't control: a subdomain of shop.test
+        // would still be legitimate, which is the point 4.3's narrowing turns on.
+        const verification =
+          this.scenario.deviceLinkOffsite === true ? `${SIBLING}/activate` : `${ORIGIN}/activate`;
+        return json(200, {
+          device_code: DEVICE_CODE,
+          user_code: "WDJB-MJHT",
+          verification_uri: verification,
+          verification_uri_complete: `${verification}?user_code=WDJB-MJHT`,
+          expires_in: 600,
+          interval: 0,
+        });
+      }
       case AUTHORIZE:
         if (method !== "GET") return json(405, {});
         // The User's browser: the issuer approves and sends it back to the agent's redirect_uri.
@@ -697,6 +756,17 @@ export class ConformanceCompany {
         this.fail("oauth.direct-request", "the token request's redirect_uri differs");
       return json(200, this.#issue(issued.scope, undefined, jkt, true));
     }
+    if (grant === "urn:ietf:params:oauth:grant-type:device_code") {
+      if (form.get("device_code") !== DEVICE_CODE) return json(400, { error: "invalid_grant" });
+      if (this.scenario.deviceLinkOffsite === true && this.version !== "0.3") {
+        // 0.4 allows only the issuer's host or organization.domain; this link was neither, and the
+        // agent showed it anyway. On 0.3 that host is still legitimate, so nothing is recorded.
+        this.fail("oauth.device-link", "polled after a link 0.4 doesn't allow");
+        return json(400, { error: "access_denied" });
+      }
+      this.pass("oauth.device-link");
+      return json(200, this.#issue(["orders:read"], undefined, jkt, true));
+    }
     if (grant === "refresh_token") {
       const value = form.get("refresh_token") ?? "";
       if (this.#retiredRefresh.has(value)) {
@@ -750,10 +820,13 @@ export class ConformanceCompany {
       return json(400, { error: "invalid_session" });
     }
     this.pass("session.header");
+    this.#checkOperator(request);
     const session = await this.#verifySession(jwt, method, url);
     if (session === undefined) return json(400, { error: "invalid_session" });
     const version = this.#checkVersion(headers, String(session.payload["sid"]));
     if (version !== undefined) return version;
+    const limited = this.#checkRateLimit(request);
+    if (limited !== undefined) return limited;
 
     const authorization = headers.get("authorization");
     const [scheme, value] = authorization?.split(" ") ?? [];
@@ -1003,6 +1076,51 @@ export class ConformanceCompany {
     else this.pass("versions.selection");
   }
 
+  /** Called by the runner after a Device Sign-In scenario with an off-host link (spec 4.3). */
+  checkDeviceLink(): void {
+    if (this.scenario.deviceLinkOffsite !== true || this.version === "0.3") return;
+    const polled = this.requests.some(
+      (r) => `${r.url.origin}${r.url.pathname}` === TOKEN && r.body.includes("device_code"),
+    );
+    // An agent that never asked for a device code never polls one either, so it has shown
+    // nothing about the rule. That is a skip, not a pass.
+    const started = this.requests.some(
+      (r) => r.method === "POST" && `${r.url.origin}${r.url.pathname}` === `${ORIGIN}/oauth/device`,
+    );
+    // Refusing to show the link means never getting a token from it.
+    if (started && !polled) this.pass("oauth.device-link");
+  }
+
+  /**
+   * Called by the runner after a scenario that opens a second Session (spec section 9). Reusing the
+   * first Session's answer is the violation, and it is invisible in the requests: the second Session
+   * simply never asks. Only the absence can report it, so the runner asks at the end.
+   */
+  checkTaskCoverage(): void {
+    if (this.version === "0.3") return;
+    const sids = new Set(this.requests.map((r) => this.#sidOf(r)).filter((sid) => sid !== ""));
+    // Without a second Session the scenario never happened, and the check stays unexercised.
+    if (sids.size < 2 || this.#taskSids.size === 0) return;
+    if (this.#taskSids.size === 1)
+      this.fail("tasks.per-session", "a second Session reused the first Session's task coverage");
+  }
+
+  /**
+   * Called by the runner after a scenario that asks for a report on an excluded task (spec 9.3). An
+   * agent that honours the list sends nothing, so, as above, only the runner can see it did.
+   */
+  checkExcludedReport(): void {
+    // An agent that never read the coverage can't have decided anything about it: not reporting is
+    // then silence, not restraint. Only an agent that read the list and held back has shown the rule.
+    const read = this.requests.some((r) =>
+      [EXCLUDED_TASKS_DOC, TASKS].includes(`${r.url.origin}${r.url.pathname}`),
+    );
+    const reported = this.requests.some(
+      (r) => r.method === "POST" && `${r.url.origin}${r.url.pathname}` === FEEDBACK,
+    );
+    if (read && !reported) this.pass("tasks.not-excluded");
+  }
+
   /** Called by the runner after a version_mismatch scenario (spec 8.13). */
   checkVersionMismatch(): void {
     if (this.#mismatches === 0) return;
@@ -1046,6 +1164,98 @@ export class ConformanceCompany {
         this.fail("session.invalid-session", "sent the request again after invalid_session");
       else if (this.#sessionErrors === 1) this.pass("session.invalid-session");
     }
+  }
+
+  /**
+   * Checks the operator signature on a request that carries the Session header (spec 5.3, RFC 9421
+   * in the Web Bot Auth profile). What matters here is what it binds: a signature that leaves out
+   * the Session header, or the access token when one is present, doesn't tie the operator to the
+   * Session the request claims. The key directory isn't fetched, so the bytes aren't verified.
+   */
+  #checkOperator({ headers }: Recorded): void {
+    const input = headers.get("signature-input");
+    // A SHOULD: an agent that doesn't sign at all isn't recorded either way.
+    if (input === null) return;
+    if (!headers.has("signature")) {
+      this.fail("session.operator-signature", "Signature-Input without a Signature");
+      return;
+    }
+    const covered = [...input.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    const problems: string[] = [];
+    if (!covered.includes("poppy-session")) problems.push("doesn't cover poppy-session");
+    if (headers.has("authorization") && !covered.includes("authorization"))
+      problems.push("doesn't cover authorization, which the request carries");
+    if (!covered.includes("@authority")) problems.push("doesn't cover @authority");
+    for (const parameter of ["keyid", "created", "expires"])
+      if (!input.includes(`${parameter}=`)) problems.push(`has no ${parameter}`);
+    if (problems.length > 0)
+      for (const problem of problems) this.fail("session.operator-signature", problem);
+    else this.pass("session.operator-signature");
+  }
+
+  /** The extensions this Company lists, by name, whatever shape its version uses (spec 3.3). */
+  #listedExtensions(): Record<string, unknown> {
+    const listed = this.#document(this.version)["extensions"];
+    return typeof listed === "object" && listed !== null ? (listed as Record<string, unknown>) : {};
+  }
+
+  /**
+   * The version a request declares for `name` in Poppy-Extensions, or undefined when it declares
+   * none. The member shape is already checked by `extensions.declared`; this reads the `v` of the
+   * one member that names this extension, rather than asking whether the name appears anywhere.
+   */
+  #declaredVersion(header: string, name: string): string | undefined {
+    for (const member of header.split(",")) {
+      const parsed = /^\s*"([^"]+)";v="([^"]+)"\s*$/.exec(member);
+      if (parsed?.[1] === name) return parsed[2];
+    }
+    return undefined;
+  }
+
+  /** The versions this Company lists for `name`: 0.3 lists one entry, 0.4 one per major (3.3). */
+  #listedVersions(name: string): string[] {
+    const entry = this.#listedExtensions()[name];
+    const entries = Array.isArray(entry) ? entry : [entry];
+    return entries.flatMap((one) =>
+      typeof one === "object" &&
+      one !== null &&
+      typeof (one as Record<string, unknown>)["version"] === "string"
+        ? [(one as Record<string, unknown>)["version"] as string]
+        : [],
+    );
+  }
+
+  /** The `sid` a request's Session header names, or "" when it carries none. */
+  #sidOf({ headers }: Recorded): string {
+    const decoded = safeDecode(headers.get("poppy-session") ?? "");
+    return typeof decoded?.payload["sid"] === "string" ? decoded.payload["sid"] : "";
+  }
+
+  /**
+   * Rate limits the first request to a path, then measures how long the agent waited before sending
+   * it again (spec 5.6): `Retry-After` is a floor, not a suggestion.
+   */
+  #checkRateLimit({ url, at }: Recorded): Response | undefined {
+    const seconds = this.scenario.rateLimitSeconds;
+    if (seconds === undefined) return undefined;
+    const path = `${url.origin}${url.pathname}`;
+    const limited = this.#rateLimited.get(path);
+    if (limited === undefined) {
+      this.#rateLimited.set(path, at);
+      return new Response(JSON.stringify({ error: "rate_limited" }), {
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": String(seconds) },
+      });
+    }
+    const waited = (at - limited) / 1000;
+    // A small tolerance for the clock, not for an agent that didn't wait.
+    if (waited + 0.05 < seconds)
+      this.fail(
+        "session.rate-limit",
+        `sent the request again after ${waited.toFixed(2)}s, with Retry-After ${seconds}`,
+      );
+    else this.pass("session.rate-limit");
+    return undefined;
   }
 
   // ---------- Browser join and website pages ----------
@@ -1134,7 +1344,10 @@ export class ConformanceCompany {
    * The 0.4 tasks response (spec section 9). It describes what the Company offers, not the account, so
    * the request carries the Session header and no access token, even in a signed-in Session.
    */
-  #tasks({ method, headers }: Recorded): Response {
+  #tasks({ method, headers }: Recorded, sid: string): Response {
+    this.#taskSids.add(sid);
+    // A second Session asking is the point: an answer is never reused in another one (spec 9).
+    if (this.#taskSids.size > 1) this.pass("tasks.per-session");
     if (method !== "GET") {
       this.fail("tasks.session", `fetched tasks.endpoint with ${method}, not GET`);
       return json(405, { error: "invalid_request" });
@@ -1145,7 +1358,7 @@ export class ConformanceCompany {
     return json(
       200,
       {
-        excluded_tasks: [{ task: "Send a wire transfer" }],
+        excluded_tasks: EXCLUDED_TASKS.map((task) => ({ task })),
         feedback: { endpoint: FEEDBACK },
       },
       { "cache-control": "private" },
@@ -1184,7 +1397,7 @@ export class ConformanceCompany {
 
   // ---------- Conversations ----------
 
-  #conversation({ method, url, body }: Recorded): Response {
+  #conversation({ method, url, body, headers }: Recorded): Response {
     const rest = url.pathname
       .slice(new URL(CONVERSATIONS).pathname.length)
       .split("/")
@@ -1238,6 +1451,26 @@ export class ConformanceCompany {
         this.fail("conversation.messages", "a message has no content");
         return false;
       }
+      // Content an extension defines goes only to a side that uses that extension at that version
+      // (spec 8.4). On 0.4 the request declares what it uses; on 0.3 the client document does.
+      const content = message?.["extensions"];
+      if (typeof content === "object" && content !== null && !Array.isArray(content)) {
+        const declared = headers.get("poppy-extensions") ?? "";
+        const listed = Object.keys(this.#listedExtensions());
+        for (const name of Object.keys(content)) {
+          // 0.3 reads the client's document, which this Company can't see here, so listing is the
+          // most it can check; 0.4 has the request itself say what it uses, at which version.
+          const version = this.#declaredVersion(declared, name);
+          const shared = version !== undefined && this.#listedVersions(name).includes(version);
+          const usable = listed.includes(name) && (!isV4 || shared);
+          if (usable) this.pass("conversation.extension-version");
+          else
+            this.fail(
+              "conversation.extension-version",
+              `sent ${name} content to a Company that doesn't use it at that version`,
+            );
+        }
+      }
       this.pass("conversation.messages");
       return true;
     };
@@ -1250,6 +1483,22 @@ export class ConformanceCompany {
         role: "company",
         author: { type: "agent" },
         text: `Reply in ${id}`,
+        // Content an extension defines travels in `extensions`, keyed by name (spec 8.4).
+        ...(this.scenario.operationInConversation === true
+          ? {
+              extensions: {
+                operations: {
+                  operation: {
+                    operation_id: "exc_1",
+                    revision: "r1",
+                    summary: "Exchange the jacket for **$70** more.",
+                    terms: { price_difference: 70 },
+                    expires_at: new Date(Date.now() + 600_000).toISOString(),
+                  },
+                },
+              },
+            }
+          : {}),
       },
     });
     // 0.3 reports one status; 0.4 reports four independent fields (spec 8.7).
