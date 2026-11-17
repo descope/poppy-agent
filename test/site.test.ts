@@ -140,13 +140,15 @@ describe("checkSite", () => {
     expect(byId(results, "extensions.entries:loyalty")?.ok).toBe(false);
   });
 
-  it("reads a missing domain PRM the way an agent does — as no issuer at all", async () => {
+  // The fixture declares `auth.issuer`, so a 404 here is the case `findIssuer` throws on: the
+  // document names an issuer the domain will not confirm. Without a declared issuer the same 404
+  // is a Company that simply has none, which the website-only case below covers.
+  it("fails a missing domain PRM when auth.issuer names one anyway", async () => {
     const documents = conformingSite();
     delete documents[`${ORIGIN}/.well-known/oauth-protected-resource`];
-    const results = await check(documents);
-    const result = byId(results, "prm.domain");
+    const result = byId(await check(documents), "prm.domain");
     expect(result?.ok).toBe(false);
-    expect(result?.detail).toContain("no issuer");
+    expect(result?.detail).toContain(ISSUER);
   });
 
   it("catches a domain PRM whose resource carries a path", async () => {
@@ -231,9 +233,14 @@ describe("checkSite", () => {
       documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, web: {} };
       // What makes it website-only is the absent issuer, not the absent `auth` key.
       delete documents[`${ORIGIN}/.well-known/oauth-protected-resource`];
-      const result = byId(await check(documents), "surface.session-usable");
+      const results = await check(documents);
+      const result = byId(results, "surface.session-usable");
       expect(result?.ok).toBe(true);
       expect(result?.detail).toContain("no issuer");
+      // Asserting the one rule hid that this very site was failing `prm.domain`, so the Company
+      // the comment calls valid exited non-zero. The whole report has to be clean, not one line
+      // of it: `discover()` accepts this Company, so nothing here may record a MUST against it.
+      expect(results.filter((r) => !r.ok && r.level === "MUST").map((r) => r.id)).toEqual([]);
     });
 
     // `findIssuer` returns no issuer for an empty `authorization_servers`, so this Company is

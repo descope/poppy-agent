@@ -356,15 +356,28 @@ export async function checkSite(
   const resourceOrigin = originOf(final.host);
   const declaredIssuer = typeof auth["issuer"] === "string" ? auth["issuer"] : "";
   const domainPrm = await get(ctx, `${resourceOrigin}${PRM}`);
+  // A 404 here is not a broken chain, it is a Company with no OAuth issuer — valid for one that
+  // offers no sign-in (3.2), and what `findIssuer` reads it as: it passes `allowNotFound` and
+  // returns `issuer: undefined`, so `discover()` accepts the Company and agents use it signed
+  // out. Failing that would fail every website-only Company, the shape the kit recommends.
+  //
+  // With `auth.issuer` declared it is a real failure, and the same function says so by throwing
+  // "auth.issuer is set, but the domain names no issuer": the document names an issuer the
+  // domain refuses to confirm, which is the claim 3.2 exists to stop.
+  const noIssuerIsFine = domainPrm.status === 404 && declaredIssuer === "";
   const servedDomainPrm = add(
     ctx,
     "prm.domain",
     "MUST",
     "3.2",
-    domainPrm.status === 200 && domainPrm.json !== undefined,
-    `${outcome(`${resourceOrigin}${PRM}`, domainPrm)}${
-      domainPrm.status === 404 ? ' (an agent reads this as "no issuer")' : ""
-    }`,
+    noIssuerIsFine || (domainPrm.status === 200 && domainPrm.json !== undefined),
+    noIssuerIsFine
+      ? `no metadata and no auth.issuer — the Company offers no sign-in, so agents use it signed out`
+      : `${outcome(`${resourceOrigin}${PRM}`, domainPrm)}${
+          domainPrm.status === 404
+            ? ` — but auth.issuer names ${declaredIssuer}, which the domain does not confirm`
+            : ""
+        }`,
   );
 
   let authorizationServers: string[] = [];
