@@ -97,11 +97,11 @@ describe("operations", () => {
       inputType: "tap",
       reference: "apr_01JD8ZK3Q9",
     });
-    expect(approvalHeader(approval)).toBe(
+    expect(approvalHeader(approval, "3")).toBe(
       'operation_id="exc_5Rt2", revision="1791487200-k3Jd9Qx2mW8v", approver="user", ' +
         'approved_at=1791487260, input_type="tap", reference="apr_01JD8ZK3Q9"',
     );
-    expect(approvalMeta(approval)).toEqual({
+    expect(approvalMeta(approval, "3")).toEqual({
       "personalagentprotocol.org/approval": {
         operation_id: "exc_5Rt2",
         revision: "1791487200-k3Jd9Qx2mW8v",
@@ -115,15 +115,16 @@ describe("operations", () => {
 
   it("sends an agent approval without input_type, and refuses one that carries it", () => {
     const approval = agentApproval(exchange, { approvedAt: 1791487255 });
-    expect(approvalHeader(approval)).toBe(
+    expect(approvalHeader(approval, "3")).toBe(
       'operation_id="exc_5Rt2", revision="1791487200-k3Jd9Qx2mW8v", approver="agent", ' +
         "approved_at=1791487255",
     );
     // Section 6: input_type MUST NOT be sent with an agent approval.
     expect(() =>
-      approvalHeader({ ...approval, inputType: "tap" } as unknown as Parameters<
-        typeof approvalHeader
-      >[0]),
+      approvalHeader(
+        { ...approval, inputType: "tap" } as unknown as Parameters<typeof approvalHeader>[0],
+        "3",
+      ),
     ).toThrow(PoppyProtocolError);
   });
 
@@ -140,12 +141,30 @@ describe("operations", () => {
     expect(approvalField(approval, "3")).toMatchObject({ approver: "user" });
   });
 
+  it("refuses to write an approval when no version of the extension is shared", () => {
+    // `session.operationsVersion` is undefined when the Company listed no version this agent also
+    // declared. Section 2: the extension is in use only when both sides name the version, so there
+    // is nothing to write. Defaulting to the newest would put approver, approved_at, input_type and
+    // reference in front of a Company that never agreed to read them.
+    const approval = userApproval(exchange, { approvedAt: 1791487260, inputType: "tap" });
+    expect(() => approvalHeader(approval, undefined)).toThrow(PoppyProtocolError);
+    expect(() => approvalMeta(approval, undefined)).toThrow(PoppyProtocolError);
+    expect(() => approvalField(approval, undefined)).toThrow(PoppyProtocolError);
+    // A version 2 Company gets the two members version 2 defined, not a version 3 approval.
+    expect(approvalMeta(approval, "2")).toEqual({
+      "personalagentprotocol.org/approval": {
+        operation_id: "exc_5Rt2",
+        revision: "1791487200-k3Jd9Qx2mW8v",
+      },
+    });
+  });
+
   it("refuses approval members a Company must never be sent", () => {
     expect(() =>
-      approvalHeader({ operationId: 'a", b="c', revision: "r", approver: "user" }),
+      approvalHeader({ operationId: 'a", b="c', revision: "r", approver: "user" }, "3"),
     ).toThrow(PoppyProtocolError);
     expect(() =>
-      approvalHeader({ ...exchange, approver: "user", reference: "has spaces" } as never),
+      approvalHeader({ ...exchange, approver: "user", reference: "has spaces" } as never, "3"),
     ).toThrow(PoppyProtocolError);
     expect(() => userApproval(exchange, { approvedAt: 1.5 })).toThrow(PoppyProtocolError);
     // Random by construction, so the same reference never reaches two Companies (section 6).

@@ -445,31 +445,53 @@ function members(approval: Approval, version: OperationsVersion): [string, strin
 }
 
 /**
- * The `Poppy-Approval` header value, an RFC 9651 Dictionary (Operations section 6). `approved_at` is an
- * Integer and the rest are Strings.
+ * The version to write an approval for. Take it from `session.operationsVersion`, which is the one
+ * the Company listed and this agent declared, and pass it straight through: it is `undefined` when
+ * they share no version, and an approval written anyway would carry members the Company never agreed
+ * to read (section 2). Defaulting it to the newest would be a guess about another party, so it
+ * throws here instead — loudly, and before anything reaches the wire.
  */
-export function approvalHeader(approval: Approval, version: OperationsVersion = "3"): string {
-  return members(approval, version)
+function writeFor(version: OperationsVersion | undefined): OperationsVersion {
+  if (version === undefined)
+    throw new PoppyProtocolError(
+      "the Company and this agent don't share a version of the Operations extension, so an approval can't be written",
+    );
+  return version;
+}
+
+/**
+ * The `Poppy-Approval` header value, an RFC 9651 Dictionary (Operations section 6). `approved_at` is an
+ * Integer and the rest are Strings. `session.fetch()` writes this for you; pass
+ * `session.operationsVersion` when you build one yourself.
+ */
+export function approvalHeader(approval: Approval, version: OperationsVersion | undefined): string {
+  return members(approval, writeFor(version))
     .map(([key, value]) =>
       typeof value === "number" ? `${key}=${value}` : `${key}=${sfString(value, key)}`,
     )
     .join(", ");
 }
 
-/** The `_meta` member to add to the same `tools/call` to approve an MCP operation (section 6). */
+/**
+ * The `_meta` member to add to the same `tools/call` to approve an MCP operation (section 6). Pass
+ * `session.operationsVersion`: nothing else here knows what the Company agreed to.
+ */
 export function approvalMeta(
   approval: Approval,
-  version: OperationsVersion = "3",
+  version: OperationsVersion | undefined,
 ): Record<string, unknown> {
-  return { "personalagentprotocol.org/approval": approvalObject(approval, version) };
+  return { "personalagentprotocol.org/approval": approvalObject(approval, writeFor(version)) };
 }
 
-/** The `approval` field of a conversation message's `extensions.operations` (section 6). */
+/**
+ * The `approval` field of a conversation message's `extensions.operations` (section 6). Sending a
+ * message with `approval` set writes this for you; pass `session.operationsVersion` otherwise.
+ */
 export function approvalField(
   approval: Approval,
-  version: OperationsVersion = "3",
+  version: OperationsVersion | undefined,
 ): Record<string, string | number> {
-  return approvalObject(approval, version);
+  return approvalObject(approval, writeFor(version));
 }
 
 function approvalObject(

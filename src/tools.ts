@@ -420,6 +420,17 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
     return events;
   }
 
+  /**
+   * Marks every action declined anywhere in these events, not just the one the batch ends on. A
+   * decline is the Company's last word whatever follows it, and what follows it is often terms for
+   * a different action, so reading only the final outcome would drop it (Operations 6).
+   */
+  function markDeclines(events: ConversationEvent[]): void {
+    for (const event of events)
+      if (event.type === "message" && event.message.declined !== undefined)
+        needsUserApproval.add(event.message.declined.operationId);
+  }
+
   /** The last message in these events carrying an operation or a decline (Operations 4, 6). */
   function latestApprovalMessage(events: ConversationEvent[]) {
     return events
@@ -453,13 +464,14 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
     // Whichever came last is where the conversation stands. A decline of one action can be followed
     // by new terms for another, and the cursor has moved past both, so taking the decline and
     // returning would lose the operation for good (Operations 4, 6).
+    // Marked before anything is approved below, so terms arriving behind a decline in the same
+    // batch already see it. Marking, never clearing: a decline is the one moment the Company has
+    // pushed back, so revised terms for that action are exactly what section 6 sends to the User.
+    markDeclines(events);
     const latest = latestApprovalMessage(events);
     // A decline is the Company's last word on that approval (Operations 6): nothing more to approve.
     if (latest?.declined !== undefined) {
       result["approval"] = declinedForModel(latest.declined);
-      // Mark the action rather than clearing it. A decline is the one moment the Company has pushed
-      // back, so revised terms for it are exactly what section 6 sends to the User.
-      needsUserApproval.add(latest.declined.operationId);
       return result;
     }
     const operation = latest?.operation;
@@ -479,10 +491,9 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
           approval,
         });
         const after = await collect(conversation, update);
-        // The Company can decline in the very read that follows the approval. Mark it here too, so
+        // The Company can decline in the very read that follows the approval. Mark those too, so
         // the next revision of the action goes to the User whoever approved this one (6).
-        const declined = latestApprovalMessage(after)?.declined;
-        if (declined !== undefined) needsUserApproval.add(declined.operationId);
+        markDeclines(after);
         return {
           ...result,
           approved_by: approval.approver,

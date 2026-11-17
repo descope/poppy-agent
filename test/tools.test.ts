@@ -389,6 +389,71 @@ describe("poppyTools", () => {
     expect(mock.messageApprovals[0]).toMatchObject({ approver: "user" });
   });
 
+  it("records a decline that isn't the last outcome in its batch", async () => {
+    // The two rules meet here. A read takes whichever outcome came last, so terms behind a decline
+    // aren't lost — but the decline is still a decline, and reading only the last message would
+    // never record it. Batch 1 declines exc_0 and then offers terms for exc_1; batch 2 comes back
+    // with a new revision of exc_0, which section 6 sends to the User.
+    const { user, signIn } = await setup(
+      {
+        version: "1.0",
+        conversationEvents: [
+          [
+            operationsEvent("evt_1", {
+              declined: { operation_id: "exc_0", revision: "r0", reason: "Not this one." },
+            }),
+            operationsEvent("evt_2", terms("r1")),
+          ],
+          // What the Company says when it takes the approval, so the send settles without reading on.
+          [
+            {
+              id: "evt_ack",
+              type: "message",
+              created_at: "2026-10-08T19:06:00Z",
+              message: {
+                id: "msg_ack",
+                role: "company",
+                author: { type: "agent" },
+                text: "Checking those terms.",
+              },
+            },
+          ],
+          [
+            operationsEvent("evt_3", {
+              operation: {
+                operation_id: "exc_0",
+                revision: "r1",
+                summary: "The first one again, on new terms.",
+                expires_at: "2099-01-01T00:00:00Z",
+              },
+            }),
+          ],
+        ],
+      },
+      "3",
+    );
+    await signIn({ scope: ["orders:read"] });
+    const asked: { id: string; mustAskUser: boolean }[] = [];
+    const tools = poppyTools({
+      user,
+      conversationWait: 1,
+      requestApproval: async ({ operation, mustAskUser }) => {
+        asked.push({ id: operation.operationId, mustAskUser });
+        return { approver: "agent" as const };
+      },
+    });
+    const started = await runTool(tools, "poppy_conversation_send", { text: "Exchange it" });
+    await runTool(tools, "poppy_conversation_read", {
+      conversation_id: String(started["conversation_id"]),
+    });
+    // exc_1 was never declined, so it is approved on the instruction as before. exc_0 was, so its
+    // new revision must go to the User even though the decline wasn't the batch's last word.
+    expect(asked).toEqual([
+      { id: "exc_1", mustAskUser: false },
+      { id: "exc_0", mustAskUser: true },
+    ]);
+  });
+
   it("acts on the last approval outcome in a read, not on a decline earlier in it", async () => {
     // One read carrying a decline of the first action and then new terms for the next. The cursor
     // moves past both, so returning at the decline would lose the operation for good.
