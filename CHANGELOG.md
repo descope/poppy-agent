@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/descope/poppy-js/compare/poppy-v1.0.0...poppy-v1.0.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* hold pnpm at 11, which corepack can actually launch ([#30](https://github.com/descope/poppy-js/issues/30)) ([ae9c250](https://github.com/descope/poppy-js/commit/ae9c25014af8d10992daa59b6ba215f803d49d2a))
+
 ## 1.0.0 (2026-11-17)
 
 
