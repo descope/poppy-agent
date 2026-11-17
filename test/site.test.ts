@@ -192,14 +192,75 @@ describe("checkSite", () => {
     expect(byId(await check(documents), "issuer.refresh-token")?.ok).toBe(false);
   });
 
-  it("notes a site with no apis, which agents can browse but not transact with", async () => {
-    const documents = conformingSite();
-    const doc = { ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>) };
-    delete doc["apis"];
-    documents[`${ORIGIN}/.well-known/poppy.json`] = doc;
-    const result = byId(await check(documents), "apis.advertised");
-    expect(result?.ok).toBe(false);
-    expect(result?.level).toBe("SHOULD");
+  describe("a Session with nowhere to go", () => {
+    /** The document with `apis` dropped and whatever surface the case is about put back. */
+    function surfaced(doc: Record<string, unknown>): Record<string, unknown> {
+      const documents = conformingSite();
+      const poppy = {
+        ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>),
+      };
+      delete poppy["apis"];
+      documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, ...doc };
+      return documents;
+    }
+
+    // The shape real sites ship, and the one a Personal Agent declines: an issuer and scopes
+    // promising a Session, and no apis, agent or browser join to spend it on.
+    it("fails a document that advertises auth with no surface to use it on", async () => {
+      const results = await check(surfaced({ web: {} }));
+      const result = byId(results, "surface.session-usable");
+      expect(result?.ok).toBe(false);
+      expect(result?.level).toBe("SHOULD");
+      expect(result?.detail).toContain("browser");
+      // The MUST above is satisfied by `web` alone, which is why this check has to exist.
+      expect(byId(results, "discovery.surface")?.ok).toBe(true);
+    });
+
+    // The kit's website-only Company: `protocol_version`, `organization` and `web`, no `auth`.
+    // Nothing is promised, so nothing is unspendable.
+    it("passes a website-only document that advertises no auth", async () => {
+      const documents = conformingSite();
+      const poppy = {
+        ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>),
+      };
+      delete poppy["apis"];
+      delete poppy["auth"];
+      documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, web: {} };
+      const result = byId(await check(documents), "surface.session-usable");
+      expect(result?.ok).toBe(true);
+      expect(result?.detail).toContain("no auth");
+    });
+
+    it("passes a site whose only surface is browser join", async () => {
+      const results = await check(
+        surfaced({ web: { browser_session_endpoint: `${ORIGIN}/poppy/browser-session` } }),
+      );
+      const result = byId(results, "surface.session-usable");
+      expect(result?.ok).toBe(true);
+      expect(result?.detail).toContain("browser_session_endpoint");
+    });
+
+    it("passes a site whose only surface is a Company Agent", async () => {
+      const result = byId(
+        await check(surfaced({ agent: { url: `${ORIGIN}/poppy/agent` } })),
+        "surface.session-usable",
+      );
+      expect(result?.ok).toBe(true);
+      expect(result?.detail).toContain("agent");
+    });
+
+    it("names apis when that is where the Session goes", async () => {
+      const result = byId(await check(conformingSite()), "surface.session-usable");
+      expect(result?.ok).toBe(true);
+      expect(result?.detail).toContain("apis");
+    });
+
+    // An empty list is not a surface, however much it looks like one in the document.
+    it("does not count an empty apis list as somewhere to go", async () => {
+      expect(byId(await check(surfaced({ apis: [], web: {} })), "surface.session-usable")?.ok).toBe(
+        false,
+      );
+    });
   });
 
   describe("an API whose metadata is at the suffix path", () => {

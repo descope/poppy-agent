@@ -298,6 +298,43 @@ export async function checkSite(
       : "auth.scopes absent — the user reads these when approving",
   );
 
+  // A Session an agent cannot spend anywhere.
+  //
+  // `discovery.surface` above is satisfied by a bare `web: {}`, and that is correct for a
+  // Company offering only its website — the kit says such a Company publishes `protocol_version`,
+  // `organization` and `web`, with NO `auth` and no issuer (3.1, 3.2). Advertising `auth` is the
+  // claim that signing in buys the agent something. Without `apis`, `agent` or a
+  // `browser_session_endpoint` there is nowhere to spend the Session: the spec's own note on
+  // `web` says that without that endpoint "Personal Agents browse the site as ordinary
+  // signed-out visitors" (3.1).
+  //
+  // Real agents act on this. A Personal Agent weighing whether to use Poppy at all reasons that
+  // a sign-in it cannot carry into the task is worth less than signing the User in through the
+  // browser, and takes the browser instead — so the document is not merely thin, it loses to the
+  // alternative. This is the difference between a document that passes and one that gets used.
+  const web = isObject(doc["web"]) ? doc["web"] : undefined;
+  const spends: string[] = [];
+  if (Array.isArray(doc["apis"]) && doc["apis"].length > 0) spends.push("apis");
+  if (doc["agent"] !== undefined) spends.push("agent");
+  if (typeof web?.["browser_session_endpoint"] === "string") {
+    spends.push("web.browser_session_endpoint");
+  }
+  const advertisesAuth = Object.keys(auth).length > 0;
+  add(
+    ctx,
+    "surface.session-usable",
+    "SHOULD",
+    "3.1",
+    !advertisesAuth || spends.length > 0,
+    !advertisesAuth
+      ? "no auth advertised, so no Session is promised"
+      : spends.length > 0
+        ? `a Session reaches: ${spends.join(", ")}`
+        : "auth is advertised with no apis, no agent and no web.browser_session_endpoint — " +
+          "an agent that signs the User in has nowhere to use the Session, so it signs them " +
+          "in through the browser instead and ignores this document",
+  );
+
   // Plain names are reserved for the protocol, which defines the few in PROTOCOL_EXTENSIONS;
   // anyone else prefixes with a domain they own. From 0.4 an entry is a list with one object per
   // major version, while 0.3 spells the same thing as a single object, and `parseExtensions`
@@ -517,14 +554,11 @@ export async function checkSite(
   const apis = Array.isArray(doc["apis"])
     ? doc["apis"].filter((entry): entry is Record<string, unknown> => isObject(entry))
     : [];
-  add(
-    ctx,
-    "apis.advertised",
-    "SHOULD",
-    "3.1",
-    apis.length > 0,
-    apis.length > 0 ? `${apis.length} advertised` : "no apis — agents can browse but not transact",
-  );
+  // No `apis.advertised` check: `surface.session-usable` above asks the question that one was
+  // reaching for, and asks it correctly. "No apis" said "agents can browse but not transact",
+  // which is false for a Company whose agents transact through a joined browser session, and it
+  // stayed quiet about the case that actually costs a Company its agents — auth advertised with
+  // nowhere to spend the Session.
 
   for (const api of apis) {
     const declared = typeof api["url"] === "string" ? api["url"] : "";
