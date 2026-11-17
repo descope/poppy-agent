@@ -13,9 +13,13 @@ import {
 /**
  * The `major.minor` versions this client implements, newest first (spec 3.1, 3.4). A Company serves one
  * version in `poppy.json` and may list others in `supported_versions`; {@link discover} picks the newest
- * of them this list names and uses that version's document.
+ * of them that is compatible with one of these and uses that version's document.
+ *
+ * Compatible is not the same as listed here: from 1.0 a newer minor version doesn't break older Personal
+ * Agents, so a `1.3` document is used by this client at `1.0`. {@link Company.protocolVersion} is the
+ * document's version and {@link Company.declaredVersion} the one sent in `Poppy-Version`.
  */
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ["0.4", "0.3"];
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ["1.0", "0.4", "0.3"];
 
 /**
  * The only scope the protocol defines (spec 4.7, section 6), from 0.4: it signs the agent's browser in to
@@ -38,6 +42,12 @@ export interface Api {
 export interface ConversationProtocol {
   type: "poppy";
   endpoint: string;
+  /**
+   * What the agent at this endpoint can help with, in plain language (spec 8.1). Required from 1.0, so
+   * a Personal Agent can tell whether a conversation serves the task at hand and choose between the
+   * entries and the Company's APIs. Undefined when a 0.4 or 0.3 Company left it out.
+   */
+  description: string | undefined;
   /** `signed_in` when the interface needs account access before useful work can begin (spec 3.2). */
   access: "session" | "signed_in";
 }
@@ -67,6 +77,18 @@ export interface OAuthServer {
   tokenEndpoint: string;
   revocationEndpoint: string;
   authorizationEndpoint: string | undefined;
+  /**
+   * `pushed_authorization_request_endpoint` (RFC 9126, spec 3.2, 4.2), from 1.0. Direct Sign-In pushes
+   * the authorization request here whenever the issuer names it. Undefined before 1.0, which defines
+   * neither this nor {@link requirePushedAuthorizationRequests}.
+   */
+  pushedAuthorizationRequestEndpoint: string | undefined;
+  /**
+   * `require_pushed_authorization_requests` (spec 3.2, 4.2), from 1.0: the Company takes Direct Sign-In
+   * only through {@link pushedAuthorizationRequestEndpoint}. Discovery refuses an issuer that sets it
+   * without naming that endpoint. Always false before 1.0.
+   */
+  requirePushedAuthorizationRequests: boolean;
   deviceAuthorizationEndpoint: string | undefined;
   grantTypesSupported: readonly string[];
   scopesSupported: readonly string[] | undefined;
@@ -120,6 +142,13 @@ export interface Company {
    * follow it, so keep the Company you discovered rather than mixing documents.
    */
   protocolVersion: string;
+  /**
+   * The version sent in `Poppy-Version` on every request in a Session (spec 3.4): the newest version
+   * this client implements that is compatible with {@link protocolVersion}. The two differ only when
+   * the Company serves a newer minor version of 1.x than this client implements, where the document is
+   * used as it stands and the Company is told which version it is talking to.
+   */
+  declaredVersion: string;
   /** The URL the chosen version's document was read from, which skill and index URLs resolve against. */
   documentUrl: string;
   /** The other versions the Company serves, each mapped to its document's URL (spec 3.4). */
@@ -218,13 +247,56 @@ function optionalStringList(value: unknown, what: string): string[] | undefined 
 
 const VERSION = /^(\d+)\.(\d+)$/;
 
+/** Reads a `major.minor` version. Returns undefined for anything that isn't one, which is never chosen. */
+function parseVersion(version: string): { major: number; minor: number } | undefined {
+  const match = VERSION.exec(version);
+  if (match === null) return undefined;
+  return { major: Number(match[1]), minor: Number(match[2]) };
+}
+
 /**
  * Orders `major.minor` versions. Returns undefined for anything that isn't one, which is never chosen.
  */
 function versionOrder(version: string): number | undefined {
-  const match = VERSION.exec(version);
-  if (match === null) return undefined;
-  return Number(match[1]) * 100_000 + Number(match[2]);
+  const parsed = parseVersion(version);
+  return parsed === undefined ? undefined : parsed.major * 100_000 + parsed.minor;
+}
+
+/**
+ * Whether two versions are compatible (spec 3.4): the same major version and, before 1.0, the same
+ * minor version. From 1.0 a newer minor version doesn't break an older Personal Agent, which uses the
+ * document and ignores the fields it doesn't recognize, so `1.0` and `1.3` are compatible while `0.3`
+ * and `0.4` are not.
+ *
+ * Use this, not `SUPPORTED_PROTOCOL_VERSIONS.includes()`, to ask whether a version a Company serves is
+ * one this SDK can work at: from 1.0 the two answers differ.
+ */
+export function compatible(left: string, right: string): boolean {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  if (a === undefined || b === undefined || a.major !== b.major) return false;
+  return a.major >= 1 || a.minor === b.minor;
+}
+
+/**
+ * Whether a version is 1.0 or later. Rules the protocol introduced in 1.0 are gated on this rather than
+ * on the exact string, so a `1.3` document this client uses at `1.0` follows them too.
+ */
+export function fromVersionOne(version: string): boolean {
+  return (parseVersion(version)?.major ?? 0) >= 1;
+}
+
+/**
+ * The version this client sends in `Poppy-Version` for a chosen document (spec 3.4): "the protocol
+ * version it implements, compatible with the chosen one". With a `1.3` document and 1.0 implemented,
+ * that is `1.0`, and the Company then offers it only what 1.0 defines.
+ */
+function declaredFor(chosen: string): string {
+  return (
+    SUPPORTED_PROTOCOL_VERSIONS.filter((version) => compatible(version, chosen)).sort(
+      (a, b) => (versionOrder(b) ?? 0) - (versionOrder(a) ?? 0),
+    )[0] ?? chosen
+  );
 }
 
 /**
@@ -264,16 +336,17 @@ function parseSupportedVersions(
 }
 
 /**
- * Picks the newest version the Company serves that this client implements (spec 3.4). Two versions are
- * compatible when they have the same major version and, before 1.0, the same minor version, so a version
- * this client implements is simply one of {@link SUPPORTED_PROTOCOL_VERSIONS}.
+ * Picks the newest version the Company serves that is compatible with one this client implements
+ * (spec 3.4), newest first. Before 1.0 that is an exact match, since those versions are compatible only
+ * with themselves; from 1.0 a newer minor version the Company serves is compatible too, and the client
+ * uses that document while declaring the version it implements.
  */
 function choosableVersions(
   documentVersion: string,
   supportedVersions: Readonly<Record<string, string>>,
 ): string[] {
   return [documentVersion, ...Object.keys(supportedVersions)]
-    .filter((version) => SUPPORTED_PROTOCOL_VERSIONS.includes(version))
+    .filter((served) => SUPPORTED_PROTOCOL_VERSIONS.some((version) => compatible(version, served)))
     .map((version) => ({ version, order: versionOrder(version) }))
     .filter((entry): entry is { version: string; order: number } => entry.order !== undefined)
     .sort((a, b) => b.order - a.order)
@@ -328,17 +401,27 @@ function parseApis(value: unknown): Api[] {
   return apis;
 }
 
-/** Unknown protocol types are skipped, and unknown `access` values read as absent (spec 3.2, 8.1). */
-function parseProtocols(agent: unknown): ConversationProtocol[] {
+/**
+ * Unknown protocol types are skipped, and unknown `access` values read as absent (spec 3.2, 8.1).
+ *
+ * From 1.0 every entry MUST carry a non-empty `description`, so a `poppy` entry without one is refused
+ * the way one without an `endpoint` is. Entries of a type this client doesn't speak are skipped before
+ * the check, as they always were: their description would say nothing it could act on.
+ */
+function parseProtocols(agent: unknown, version: string): ConversationProtocol[] {
   if (agent === undefined) return [];
   if (!isObject(agent) || !Array.isArray(agent["protocols"]))
     throw new PoppyProtocolError("agent.protocols must be a list");
   return agent["protocols"].flatMap((protocol, index): ConversationProtocol[] => {
     if (!isObject(protocol) || protocol["type"] !== "poppy") return [];
+    const described = typeof protocol["description"] === "string" && protocol["description"] !== "";
+    if (fromVersionOne(version) && !described)
+      throw new PoppyProtocolError(`agent.protocols[${index}].description is missing`);
     return [
       {
         type: "poppy",
         endpoint: httpsUrl(protocol["endpoint"], `agent.protocols[${index}].endpoint`).href,
+        description: described ? (protocol["description"] as string) : undefined,
         access: protocol["access"] === "signed_in" ? "signed_in" : "session",
       },
     ];
@@ -536,12 +619,20 @@ async function findIssuer(
   return { issuer: authIssuer, scopesSupported };
 }
 
-/** RFC 9728 section 3.3 comparison, with the host compared ignoring case (spec 3.2). */
+/**
+ * RFC 9728 section 3.3 comparison, with the host compared ignoring case (spec 3.2).
+ *
+ * `protected_resources` names the domain as `https://{domain}` with no path or trailing slash. From 1.0
+ * it carries the port `organization.domain` does, so a Company on another port can be tested; 3.2 took
+ * "port" out of what the entry may not contain for that reason.
+ *
+ * The version needs no guard of its own here. `domain` already follows its version's rule — before 1.0
+ * it is a hostname and can never hold a port — so an entry naming one matches nothing on those
+ * versions whether or not the shape allows it.
+ */
 function listsDomain(protectedResources: readonly string[], domain: string): boolean {
-  return protectedResources.some((entry) => {
-    const match = /^https:\/\/([^/?#:@]+)$/i.exec(entry);
-    return match?.[1]?.toLowerCase() === domain;
-  });
+  const shape = /^https:\/\/([^/?#@]+)$/i;
+  return protectedResources.some((entry) => shape.exec(entry)?.[1]?.toLowerCase() === domain);
 }
 
 async function fetchOAuthServer(
@@ -549,6 +640,7 @@ async function fetchOAuthServer(
   issuer: string,
   domain: string,
   allowPrivate: boolean,
+  version: string,
 ): Promise<OAuthServer> {
   httpsUrl(issuer, "issuer");
   const { body } = await getJson(
@@ -569,6 +661,18 @@ async function fetchOAuthServer(
     throw new PoppyProtocolError("grant_types_supported must include refresh_token");
   const endpoint = (key: string, required: boolean) =>
     required || body[key] !== undefined ? httpsUrl(body[key], key).href : undefined;
+  // Pushed Authorization Requests are 1.0's (spec 3.2, 4.2). Before that the protocol defines neither
+  // field, so an issuer that happens to publish them is read as it was, and Direct Sign-In is unchanged.
+  const pushedAuthorizationRequestEndpoint = fromVersionOne(version)
+    ? endpoint("pushed_authorization_request_endpoint", false)
+    : undefined;
+  const requirePushedAuthorizationRequests =
+    fromVersionOne(version) && body["require_pushed_authorization_requests"] === true;
+  if (requirePushedAuthorizationRequests && pushedAuthorizationRequestEndpoint === undefined) {
+    throw new PoppyProtocolError(
+      "require_pushed_authorization_requests is set, but there is no pushed_authorization_request_endpoint",
+    );
+  }
   return {
     issuer,
     tokenEndpoint: string(endpoint("token_endpoint", true), "token_endpoint"),
@@ -577,6 +681,8 @@ async function fetchOAuthServer(
       "authorization_endpoint",
       grantTypes.includes("authorization_code"),
     ),
+    pushedAuthorizationRequestEndpoint,
+    requirePushedAuthorizationRequests,
     deviceAuthorizationEndpoint: endpoint(
       "device_authorization_endpoint",
       grantTypes.includes(DEVICE_CODE_GRANT),
@@ -638,7 +744,12 @@ function parseDocument(
   const organization = doc["organization"];
   if (!isObject(organization)) throw new PoppyProtocolError("organization is missing");
   const domain = string(organization["domain"], "organization.domain").toLowerCase();
-  if (domain !== finalUrl.hostname.toLowerCase()) {
+  // From 1.0 organization.domain carries its port when that isn't 443 (spec 3.1), so it names the host
+  // that served the document: a document on shop.example:8443 speaks for shop.example:8443, not for
+  // shop.example. Before 1.0 it is the hostname alone, and `host` would never match a document with a
+  // port, so each version is held to its own rule. `URL.host` leaves out the default port either way.
+  const servedBy = (fromVersionOne(version) ? finalUrl.host : finalUrl.hostname).toLowerCase();
+  if (domain !== servedBy) {
     throw new PoppyProtocolError(
       `organization.domain ${domain} does not match the host that served it`,
     );
@@ -651,7 +762,7 @@ function parseDocument(
       ? undefined
       : httpsUrl(organization["logo_uri"], "organization.logo_uri").href;
   const auth = isObject(doc["auth"]) ? doc["auth"] : {};
-  const conversationProtocols = parseProtocols(doc["agent"]);
+  const conversationProtocols = parseProtocols(doc["agent"], version);
   const apis = parseApis(doc["apis"]);
   const extensions = parseExtensions(doc["extensions"], version);
   const web = isObject(doc["web"]) ? doc["web"] : undefined;
@@ -784,7 +895,7 @@ export async function discover(website: string, options: DiscoverOptions = {}): 
   const oauth =
     issuer === undefined
       ? undefined
-      : await fetchOAuthServer(fetchFn, issuer, chosen.domain, allowPrivate);
+      : await fetchOAuthServer(fetchFn, issuer, chosen.domain, allowPrivate, chosen.version);
   if (oauth === undefined && chosen.conversationProtocols.some((p) => p.access === "signed_in"))
     throw new PoppyProtocolError("a signed_in conversation protocol needs an issuer");
   const disabled = chosen.disabled;
@@ -798,12 +909,14 @@ export async function discover(website: string, options: DiscoverOptions = {}): 
     oauth?.revocationEndpoint,
     oauth?.authorizationEndpoint,
     oauth?.deviceAuthorizationEndpoint,
+    oauth?.pushedAuthorizationRequestEndpoint,
   ]) {
     if (url !== undefined) checkPublicHost(new URL(url), "Company URL", allowPrivate);
   }
 
   return {
     protocolVersion: chosen.version,
+    declaredVersion: declaredFor(chosen.version),
     documentUrl: chosen.documentUrl.href,
     supportedVersions,
     domain: chosen.domain,

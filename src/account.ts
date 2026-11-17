@@ -1,4 +1,9 @@
-import { type Company, DEVICE_CODE_GRANT, MEDIATED_SIGN_IN_GRANT } from "./discovery.ts";
+import {
+  type Company,
+  DEVICE_CODE_GRANT,
+  fromVersionOne,
+  MEDIATED_SIGN_IN_GRANT,
+} from "./discovery.ts";
 import { DpopKey } from "./dpop.ts";
 import { errorBodies, errorFromResponse, PoppyError, PoppyProtocolError } from "./errors.ts";
 import { type Fetch, isObject, postForm, sleep } from "./http.ts";
@@ -11,11 +16,13 @@ import {
   oauthError,
   parseTokenResponse,
   pkce,
+  pushAuthorizationRequest,
   requireOAuth,
   revokeRefreshToken,
   splitScope,
   tokenRequest,
   type TokenResponse,
+  usesPushedAuthorization,
 } from "./oauth.ts";
 import type { ResourceChoice } from "./resources.ts";
 import type { Store } from "./store.ts";
@@ -279,7 +286,12 @@ export class Account {
 
   /** Starts Direct Sign-In (spec 4.2): returns the URL to open in the User's browser. */
   async startDirect(
-    options: { scope: string | readonly string[]; redirectUri: string; replaceScopes?: boolean },
+    options: {
+      scope: string | readonly string[];
+      redirectUri: string;
+      replaceScopes?: boolean;
+      sameDevice?: boolean;
+    },
     pending: Omit<
       PendingDirectSignIn,
       "verifier" | "redirectUri" | "scope" | "expiresAt" | "issuer" | "identifier"
@@ -301,15 +313,41 @@ export class Account {
       scope,
       expiresAt: Date.now() + PENDING_LIFETIME,
     };
-    await this.#init.store.set(`${PENDING_PREFIX}${state}`, JSON.stringify(record));
+    const params: Record<string, string> = {
+      response_type: "code",
+      client_id: this.#init.clientId,
+      redirect_uri: options.redirectUri,
+      scope: scope.join(" "),
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    };
+    // From 1.0 the request asks for the consent page unless the redirect can only come back to the
+    // device that opened this URL, where a forwarded link fails anyway (spec 4.2, 10.8). Every User of
+    // this agent shares one `client_id`, so without it a Company that skips the page because the
+    // account granted these scopes before would hand a link someone forwarded tokens with no page at
+    // all. A Company that doesn't support the parameter ignores it, as RFC 6749 section 3.1 requires.
+    if (fromVersionOne(this.#init.company.protocolVersion) && options.sameDevice !== true)
+      params["prompt"] = "consent";
     const url = new URL(oauth.authorizationEndpoint);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("client_id", this.#init.clientId);
-    url.searchParams.set("redirect_uri", options.redirectUri);
-    url.searchParams.set("scope", scope.join(" "));
-    url.searchParams.set("state", state);
-    url.searchParams.set("code_challenge", challenge);
-    url.searchParams.set("code_challenge_method", "S256");
+    if (usesPushedAuthorization(oauth)) {
+      // Pushed: the browser is given only what it needs to find the request the Company already has.
+      const requestUri = await pushAuthorizationRequest(
+        this.#context(),
+        params,
+        await this.#dpopFor(),
+      );
+      url.searchParams.set("client_id", this.#init.clientId);
+      url.searchParams.set("request_uri", requestUri);
+    } else {
+      for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    }
+    // Written last, once there is a sign-in to remember. Pushing can fail (4.2), and the caller only
+    // adds `state` to the index that sweeps expired records after this resolves — so a record written
+    // before the push would survive a failed one in no index, with the PKCE verifier in it, until the
+    // store was cleared by hand. Nothing between here and the record reads it, and the URL hasn't
+    // reached the caller yet, so there is no window the other way.
+    await this.#init.store.set(`${PENDING_PREFIX}${state}`, JSON.stringify(record));
     return { url: url.href, state };
   }
 

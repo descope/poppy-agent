@@ -13,7 +13,7 @@
  * writes — safe to point at a production domain.
  */
 
-import { DEVICE_CODE_GRANT, SUPPORTED_PROTOCOL_VERSIONS } from "../discovery.ts";
+import { compatible, DEVICE_CODE_GRANT, SUPPORTED_PROTOCOL_VERSIONS } from "../discovery.ts";
 import {
   authorizationServerMetadataUrl,
   httpsUrl,
@@ -45,7 +45,16 @@ export interface SiteCheckOptions {
 const WELL_KNOWN = "/.well-known/poppy.json";
 const PRM = "/.well-known/oauth-protected-resource";
 /** The newest version this SDK implements, which is the one an agent prefers (spec 3.4). */
-const NEWEST_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0] ?? "0.4";
+export const NEWEST_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0] ?? "0.4";
+
+/**
+ * Whether an agent could choose a version a site serves (spec 3.4). Not "is it in the list": two
+ * versions are compatible when they share a major version and, before 1.0, a minor one, so from 1.0 a
+ * site serving a newer minor than this SDK implements is one an agent uses, not one it refuses.
+ */
+function speakable(listed: string): boolean {
+  return SUPPORTED_PROTOCOL_VERSIONS.some((version) => compatible(version, listed));
+}
 /** Plain names the protocol itself defines and this SDK reads (spec 3.3). */
 const PROTOCOL_EXTENSIONS = new Set(["operations", "mediated-sign-in", "ucp"]);
 
@@ -212,7 +221,7 @@ export async function checkSite(
   // ones this SDK could choose are worth a request.
   const reachable: string[] = [];
   for (const [listed, url] of Object.entries(linked)) {
-    if (!SUPPORTED_PROTOCOL_VERSIONS.includes(listed) || !onServingHost(url)) continue;
+    if (!speakable(listed) || !onServingHost(url)) continue;
     const target = new URL(String(url), final);
     const document = await get(ctx, target);
     if (
@@ -226,7 +235,7 @@ export async function checkSite(
       reachable.push(listed);
   }
   const offered = [version, ...reachable];
-  const choosable = offered.filter((listed) => SUPPORTED_PROTOCOL_VERSIONS.includes(listed));
+  const choosable = offered.filter((listed) => speakable(listed));
   add(
     ctx,
     "discovery.version-supported",
@@ -237,13 +246,16 @@ export async function checkSite(
       ? `an agent can speak ${choosable.join(", ")}`
       : `offers ${offered.filter(Boolean).join(", ") || "(nothing)"} — this SDK speaks ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}`,
   );
+  // Compatible with the preferred version, not equal to it: from 1.0 a site serving a newer minor
+  // than this SDK implements is ahead, not behind, and an agent uses that document as it stands.
+  const current = choosable.some((listed) => compatible(listed, NEWEST_VERSION));
   add(
     ctx,
     "discovery.version-current",
     "SHOULD",
     "3.4",
-    choosable.includes(NEWEST_VERSION),
-    choosable.includes(NEWEST_VERSION)
+    current,
+    current
       ? "current"
       : `${version || "(none)"} — agents prefer ${NEWEST_VERSION}, which this site doesn't offer`,
   );

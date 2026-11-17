@@ -156,9 +156,18 @@ export class Session {
     return this.#company;
   }
 
-  /** The protocol version this Session uses, sent in `Poppy-Version` from 0.4 (spec 3.4). */
+  /** The protocol version of the document this Session works from (spec 3.4). */
   get protocolVersion(): string {
     return this.#company.protocolVersion;
+  }
+
+  /**
+   * The version sent in `Poppy-Version` from 0.4 (spec 3.4): the newest version this client implements
+   * that is compatible with {@link protocolVersion}. It differs from it only on a 1.x document newer
+   * than this client, which is used as it stands while the Company is told which version is reading it.
+   */
+  get declaredVersion(): string {
+    return this.#company.declaredVersion;
   }
 
   /**
@@ -244,7 +253,7 @@ export class Session {
             accessToken: undefined,
           }),
         );
-        headers.set("poppy-version", this.protocolVersion);
+        headers.set("poppy-version", this.declaredVersion);
         if (this.#extensionsHeader !== undefined)
           headers.set("poppy-extensions", this.#extensionsHeader);
       }
@@ -364,7 +373,7 @@ export class Session {
       // From 0.4, a request with the Session header names the version it uses, and the extensions it
       // uses with this Company, the same throughout a Session (spec 3.4).
       if (this.protocolVersion !== "0.3") {
-        headers.set("poppy-version", this.protocolVersion);
+        headers.set("poppy-version", this.declaredVersion);
         if (this.#extensionsHeader !== undefined)
           headers.set("poppy-extensions", this.#extensionsHeader);
       }

@@ -95,12 +95,60 @@ export function issuerUsesDpop(oauth: OAuthServer): boolean {
 }
 
 /** Sends a token request with a fresh client assertion, retrying once on a DPoP nonce challenge. */
-export async function tokenRequest(
+export function tokenRequest(
   context: OAuthContext,
   params: Record<string, string>,
   dpop: { key: DpopKey; nonces: Map<string, string> } | undefined,
 ): Promise<unknown> {
-  const url = context.oauth.tokenEndpoint;
+  return signedPost(context, context.oauth.tokenEndpoint, "the token endpoint", params, dpop);
+}
+
+/**
+ * Whether Direct Sign-In pushes its authorization request (RFC 9126, spec 4.2). From 1.0 a Personal
+ * Agent MUST push when the Company requires it and SHOULD push whenever the issuer names the endpoint,
+ * which then knows which Personal Agent asked before the User sees its page, and leaves nothing in the
+ * browser able to change the request. The endpoint is only ever read from a 1.0 document's issuer, so
+ * 0.4 and 0.3 sign-ins are untouched.
+ */
+export function usesPushedAuthorization(oauth: OAuthServer): boolean {
+  return oauth.pushedAuthorizationRequestEndpoint !== undefined;
+}
+
+/**
+ * Pushes an authorization request and returns the `request_uri` to open the authorization endpoint with
+ * (RFC 9126, spec 4.2). It carries the client assertion, and a DPoP proof when the agent sends them, so
+ * the Company can bind the code to the key (RFC 9449 section 10.1).
+ */
+export async function pushAuthorizationRequest(
+  context: OAuthContext,
+  params: Record<string, string>,
+  dpop: { key: DpopKey; nonces: Map<string, string> } | undefined,
+): Promise<string> {
+  const endpoint = context.oauth.pushedAuthorizationRequestEndpoint;
+  if (endpoint === undefined)
+    throw new PoppyProtocolError(
+      `${context.company.domain} offers no pushed authorization endpoint`,
+    );
+  const body = await signedPost(
+    context,
+    endpoint,
+    "the pushed authorization endpoint",
+    params,
+    dpop,
+  );
+  if (!isObject(body) || typeof body["request_uri"] !== "string" || body["request_uri"] === "")
+    throw new PoppyProtocolError("the pushed authorization response has no request_uri");
+  return body["request_uri"];
+}
+
+/** Posts a form with a fresh client assertion, retrying once on a DPoP nonce challenge. */
+async function signedPost(
+  context: OAuthContext,
+  url: string,
+  what: string,
+  params: Record<string, string>,
+  dpop: { key: DpopKey; nonces: Map<string, string> } | undefined,
+): Promise<unknown> {
   const origin = new URL(url).origin;
   for (let attempt = 0; ; attempt++) {
     const headers: Record<string, string> = {};
@@ -112,13 +160,13 @@ export async function tokenRequest(
     if (nonce !== null) dpop?.nonces.set(origin, nonce);
     if (isRedirect(response)) {
       await response.body?.cancel();
-      throw new PoppyProtocolError("the token endpoint redirected");
+      throw new PoppyProtocolError(`${what} redirected`);
     }
     if (response.ok) {
       try {
         return await response.json();
       } catch {
-        throw new PoppyProtocolError("token response is not JSON");
+        throw new PoppyProtocolError(`the response from ${what} is not JSON`);
       }
     }
     const error = await errorFromResponse(response);

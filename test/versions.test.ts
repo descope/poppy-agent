@@ -8,7 +8,10 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
   supportedScopes,
 } from "../src/index.ts";
+import { PENDING_PREFIX } from "../src/account.ts";
 import { decodeJwt } from "../src/jose.ts";
+import type { Store } from "../src/store.ts";
+import { UcpClient, type UcpNegotiation } from "../src/ucp.ts";
 import { checkSignInUrl } from "../src/oauth.ts";
 import { extensionsHeader, throwable } from "../src/session.ts";
 import {
@@ -18,6 +21,7 @@ import {
   EXCLUDED_TASKS,
   EXTRA_MCP,
   FEEDBACK,
+  ISSUER,
   LINKED_DOC,
   MockCompany,
   type MockOptions,
@@ -46,8 +50,8 @@ async function signInFor(mock: MockCompany, user: Awaited<ReturnType<typeof setu
 }
 
 describe("choosing a protocol version (spec 3.4)", () => {
-  it("implements 0.4 and 0.3, newest first", () => {
-    expect(SUPPORTED_PROTOCOL_VERSIONS).toEqual(["0.4", "0.3"]);
+  it("implements 1.0, 0.4 and 0.3, newest first", () => {
+    expect(SUPPORTED_PROTOCOL_VERSIONS).toEqual(["1.0", "0.4", "0.3"]);
   });
 
   it("uses poppy.json when the Company prefers a version this client implements", async () => {
@@ -899,5 +903,430 @@ describe("a tasks request the Session outlived (spec 5.5, 9)", () => {
     const before = mock.requests.filter((r) => r.url === TASKS).length;
     await session.taskCoverage();
     expect(mock.requests.filter((r) => r.url === TASKS)).toHaveLength(before);
+  });
+});
+
+/**
+ * A Company served on one host, for the rules 1.0 states about the host itself. MockCompany is fixed to
+ * `example.com` on the default port, and a port is exactly what these need to vary (spec 3.1, 3.2).
+ */
+function hostedAt(options: {
+  host: string;
+  version: string;
+  /** `organization.domain`, which 1.0 expects to carry the port and earlier versions not to. */
+  domain: string;
+  /** The entry in the issuer's `protected_resources`; defaults to the domain with the scheme. */
+  resource?: string;
+  /** `extensions`, for the cases that need the Company to list one (spec 3.3). */
+  extensions?: Record<string, unknown>;
+}): typeof fetch {
+  const origin = `https://${options.host}`;
+  const resource = options.resource ?? `https://${options.domain}`;
+  const body = (value: unknown) =>
+    new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  return (async (input: string | URL | Request) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    switch (`${url.origin}${url.pathname}`) {
+      case `${origin}/.well-known/poppy.json`:
+        return body({
+          protocol_version: options.version,
+          organization: { name: "Shop", domain: options.domain },
+          agent: {
+            protocols: [
+              { type: "poppy", endpoint: `${origin}/poppy`, description: "Orders and returns" },
+            ],
+          },
+          ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
+        });
+      case `${origin}/.well-known/oauth-protected-resource`:
+        return body({ resource: `${origin}`, authorization_servers: [ISSUER] });
+      case `${ISSUER}/.well-known/oauth-authorization-server`:
+        return body({
+          issuer: ISSUER,
+          token_endpoint: `${ISSUER}/token`,
+          revocation_endpoint: `${ISSUER}/revoke`,
+          grant_types_supported: ["refresh_token"],
+          protected_resources: [resource],
+        });
+      default:
+        return new Response(null, { status: 404 });
+    }
+  }) as typeof fetch;
+}
+
+/** One key for the agents built here; none of these tests signs anything with it. */
+const AGENT_KEY = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+  "sign",
+  "verify",
+]);
+
+function agentWith(fetchFn: typeof fetch): PoppyAgent {
+  return new PoppyAgent({
+    clientId: CLIENT_ID,
+    signingKey: { privateKey: AGENT_KEY.privateKey, kid: "k1" },
+    fetch: fetchFn,
+  });
+}
+
+describe("choosing and declaring a version from 1.0 (spec 3.4)", () => {
+  it("uses a 1.0 document and declares 1.0", async () => {
+    const { company } = await setup({ version: "1.0" });
+    expect(company.protocolVersion).toBe("1.0");
+    expect(company.declaredVersion).toBe("1.0");
+    // 1.0 keeps everything 0.4 moved behind the tasks endpoint.
+    expect(company.tasksEndpoint).toBe(TASKS);
+    expect(company.feedbackEndpoint).toBeUndefined();
+  });
+
+  it("prefers a 1.0 document over the 0.4 one beside it", async () => {
+    const { company, mock } = await setup({
+      version: "0.4",
+      linkOtherVersion: true,
+      linkVersion: "1.0",
+    });
+    expect(company.protocolVersion).toBe("1.0");
+    expect(company.documentUrl).toBe(LINKED_DOC);
+    expect(mock.requests.some((r) => r.url === LINKED_DOC)).toBe(true);
+  });
+
+  it("uses a newer 1.x document and tells the Company it is reading it as 1.0", async () => {
+    // From 1.0 a newer minor version doesn't break an older agent: it uses the document and ignores
+    // what it adds. So a 1.3 Company is usable, and `Poppy-Version` names the version this client
+    // implements, not the document's, so the Company offers it nothing only 1.3 defines (spec 3.4).
+    const { company, session, mock } = await setup({
+      version: "1.0",
+      poppy: (doc) => ({ ...doc, protocol_version: "1.3" }),
+    });
+    expect(company.protocolVersion).toBe("1.3");
+    expect(company.declaredVersion).toBe("1.0");
+    await session.fetch(`${API}/v1/orders`);
+    expect(mock.declaredVersions).toEqual(["1.0"]);
+    // Website pages carry the Session header too, and so the same version (spec 5.2).
+    const page = `https://example.com/help/returns`;
+    await (await session.fetchPage(page)).body?.cancel();
+    expect(mock.requests.find((r) => r.url === page)?.headers.get("poppy-version")).toBe("1.0");
+  });
+
+  it("refuses a newer minor of a version before 1.0, where minors still break", async () => {
+    const mock = await MockCompany.create({
+      version: "0.4",
+      poppy: (doc) => ({ ...doc, protocol_version: "0.5" }),
+    });
+    await expect(agentWith(mock.fetch).discover("example.com")).rejects.toThrow(PoppyProtocolError);
+  });
+
+  it("sends the document's own version when it is one this client implements", async () => {
+    const { company, session, mock } = await setup({ version: "0.4" });
+    expect(company.declaredVersion).toBe("0.4");
+    await session.fetch(`${API}/v1/orders`);
+    expect(mock.declaredVersions).toEqual(["0.4"]);
+  });
+});
+
+describe("organization.domain carries its port from 1.0 (spec 3.1, 3.2)", () => {
+  it("accepts a document on another port that names the port", async () => {
+    const company = await agentWith(
+      hostedAt({ host: "shop.test:8443", version: "1.0", domain: "shop.test:8443" }),
+    ).discover("shop.test:8443");
+    expect(company.domain).toBe("shop.test:8443");
+    // The domain resource, and so the identifier when there is no issuer, carries the port with it.
+    expect(company.oauth?.protectedResources).toEqual(["https://shop.test:8443"]);
+  });
+
+  it("refuses a 1.0 document on another port that names the host without it", async () => {
+    await expect(
+      agentWith(hostedAt({ host: "shop.test:8443", version: "1.0", domain: "shop.test" })).discover(
+        "shop.test:8443",
+      ),
+    ).rejects.toThrow(/organization\.domain/);
+  });
+
+  it("refuses a 0.4 document that names a port, which that version has no room for", async () => {
+    await expect(
+      agentWith(
+        hostedAt({ host: "shop.test:8443", version: "0.4", domain: "shop.test:8443" }),
+      ).discover("shop.test:8443"),
+    ).rejects.toThrow(/organization\.domain/);
+  });
+
+  it("refuses a 1.0 issuer whose protected_resources leaves the port off", async () => {
+    await expect(
+      agentWith(
+        hostedAt({
+          host: "shop.test:8443",
+          version: "1.0",
+          domain: "shop.test:8443",
+          resource: "https://shop.test",
+        }),
+      ).discover("shop.test:8443"),
+    ).rejects.toThrow(/protected_resources/);
+  });
+
+  // The port rule lives in `organization.domain`, not in the shape of the entry: before 1.0 the domain
+  // is a hostname, so an entry naming a port matches nothing whatever the shape allows.
+  it("refuses an entry naming a port at a version whose domain can't carry one", async () => {
+    await expect(
+      agentWith(
+        hostedAt({
+          host: "shop.test",
+          version: "0.4",
+          domain: "shop.test",
+          resource: "https://shop.test:443",
+        }),
+      ).discover("shop.test"),
+    ).rejects.toThrow(/protected_resources/);
+  });
+});
+
+describe("agent.protocols descriptions (spec 8.1)", () => {
+  it("reads the description a 1.0 Company must publish", async () => {
+    const { company } = await setup({ version: "1.0" });
+    expect(company.conversationProtocols[0]?.description).toBe("Anything about your orders");
+  });
+
+  it("refuses a 1.0 entry with no description", async () => {
+    const mock = await MockCompany.create({
+      version: "1.0",
+      poppy: (doc) => ({
+        ...doc,
+        agent: { protocols: [{ type: "poppy", endpoint: CONVERSATIONS }] },
+      }),
+    });
+    await expect(agentWith(mock.fetch).discover("example.com")).rejects.toThrow(
+      /agent\.protocols\[0\]\.description/,
+    );
+  });
+
+  it("refuses a 1.0 entry whose description is empty", async () => {
+    const mock = await MockCompany.create({
+      version: "1.0",
+      poppy: (doc) => ({
+        ...doc,
+        agent: { protocols: [{ type: "poppy", endpoint: CONVERSATIONS, description: "" }] },
+      }),
+    });
+    await expect(agentWith(mock.fetch).discover("example.com")).rejects.toThrow(
+      /agent\.protocols\[0\]\.description/,
+    );
+  });
+
+  it("leaves it optional on 0.4, which didn't require it", async () => {
+    const { company } = await setup({ version: "0.4" });
+    expect(company.conversationProtocols[0]?.endpoint).toBe(CONVERSATIONS);
+    expect(company.conversationProtocols[0]?.description).toBeUndefined();
+  });
+});
+
+describe("Pushed Authorization Requests from 1.0 (RFC 9126, spec 3.2, 4.2)", () => {
+  it("pushes the request and opens the authorization endpoint with only a handle", async () => {
+    const { mock, user } = await setup({ version: "1.0", par: "required" });
+    const { url } = await user.startDirectSignIn({ scope: "orders:read" });
+    const opened = new URL(url);
+    expect([...opened.searchParams.keys()].sort()).toEqual(["client_id", "request_uri"]);
+    expect(opened.searchParams.get("request_uri")).toMatch(/^urn:ietf:params:oauth:request_uri:/);
+    // The parameters the browser never saw reached the Company, which kept them.
+    const pushed = mock.pushedRequests.get(opened.searchParams.get("request_uri") ?? "");
+    expect(pushed?.get("scope")).toBe("orders:read");
+    expect(pushed?.get("code_challenge_method")).toBe("S256");
+    expect(pushed?.get("client_assertion")).toBeTruthy();
+    // And the sign-in still finishes from the handle alone.
+    await user.completeDirectSignIn(await mock.approve(url));
+    expect(user.scope).toEqual(["orders:read"]);
+  });
+
+  it("pushes whenever the issuer offers the endpoint, without being required to", async () => {
+    const { mock, user } = await setup({ version: "1.0", par: "offered" });
+    const { url } = await user.startDirectSignIn({ scope: "orders:read" });
+    expect(new URL(url).searchParams.get("request_uri")).not.toBeNull();
+    expect(mock.requests.some((r) => r.url === `${ISSUER}/par`)).toBe(true);
+  });
+
+  it("sends a DPoP proof with the pushed request, so the code can be bound to the key", async () => {
+    const { mock, user } = await setup({ version: "1.0", par: "required", tokenType: "DPoP" });
+    await user.startDirectSignIn({ scope: "orders:read" });
+    const push = mock.requests.find((r) => r.url === `${ISSUER}/par`);
+    expect(push?.headers.get("dpop")).toBeTruthy();
+  });
+
+  it("refuses an issuer that requires pushing but names no endpoint", async () => {
+    const mock = await MockCompany.create({ version: "1.0", par: "required-without-endpoint" });
+    await expect(agentWith(mock.fetch).discover("example.com")).rejects.toThrow(
+      /pushed_authorization_request_endpoint/,
+    );
+  });
+
+  it("refuses a pushed response with no request_uri", async () => {
+    const mock = await MockCompany.create({ version: "1.0", par: "required" });
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.href === `${ISSUER}/par`)
+        return new Response(JSON.stringify({ expires_in: 60 }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      return mock.fetch(input, init);
+    }) as typeof fetch;
+    const agent = agentWith(fetchFn);
+    const company = await agent.discover("example.com");
+    const user = await agent.user(company, "alice");
+    await expect(
+      user.startDirectSignIn({
+        scope: "orders:read",
+        redirectUri: "https://agent.example/callback",
+      }),
+    ).rejects.toThrow(/request_uri/);
+  });
+
+  it("leaves 0.4 sign-in alone, even at an issuer that publishes the metadata", async () => {
+    const { mock, user } = await setup({ version: "0.4", par: "required" });
+    expect(mock.options.par).toBe("required");
+    const { url } = await user.startDirectSignIn({ scope: "orders:read" });
+    // 0.4 defines neither field, so the agent neither reads nor acts on them.
+    expect(user.company.oauth?.pushedAuthorizationRequestEndpoint).toBeUndefined();
+    expect(user.company.oauth?.requirePushedAuthorizationRequests).toBe(false);
+    expect(new URL(url).searchParams.get("code_challenge")).not.toBeNull();
+    expect(mock.requests.some((r) => r.url === `${ISSUER}/par`)).toBe(false);
+  });
+});
+
+describe("asking for the consent page from 1.0 (spec 4.2, 10.8)", () => {
+  it("sends prompt=consent on a 1.0 Direct Sign-In", async () => {
+    const { user } = await setup({ version: "1.0" });
+    const { url } = await user.startDirectSignIn({ scope: "orders:read" });
+    expect(new URL(url).searchParams.get("prompt")).toBe("consent");
+  });
+
+  it("leaves it out when the redirect can only come back to this device", async () => {
+    const { user } = await setup({ version: "1.0" });
+    const { url } = await user.startDirectSignIn({ scope: "orders:read", sameDevice: true });
+    expect(new URL(url).searchParams.get("prompt")).toBeNull();
+  });
+
+  it("doesn't send it on 0.4, which doesn't ask for it", async () => {
+    const { user } = await setup({ version: "0.4" });
+    const { url } = await user.startDirectSignIn({ scope: "orders:read" });
+    expect(new URL(url).searchParams.get("prompt")).toBeNull();
+  });
+
+  it("pushes it with the rest of the request when the Company takes pushed ones", async () => {
+    const { mock, user } = await setup({ version: "1.0", par: "required" });
+    const { url } = await user.startDirectSignIn({ scope: "orders:read" });
+    const uri = new URL(url).searchParams.get("request_uri") ?? "";
+    expect(mock.pushedRequests.get(uri)?.get("prompt")).toBe("consent");
+  });
+});
+
+describe("review of PR #25", () => {
+  /** The smallest negotiation UcpClient's constructor reads (UCP extension 3, 4). */
+  function negotiationFrom(profileUrl: string): UcpNegotiation {
+    const origin = new URL(profileUrl).origin;
+    return {
+      business: {
+        url: profileUrl,
+        version: "2026-08-25",
+        supportedVersions: {},
+        services: {},
+        capabilities: {},
+        paymentHandlers: {},
+        keys: [],
+      },
+      version: "2026-08-25",
+      capabilities: {},
+      restEndpoint: `${origin}/ucp`,
+      mcpEndpoint: undefined,
+    };
+  }
+
+  const listsUcp = (doc: Record<string, unknown>) => ({
+    ...doc,
+    extensions: { ...(doc["extensions"] as Record<string, unknown>), ucp: [{ version: "1" }] },
+  });
+
+  it("takes a UCP profile from the Company's own origin, port and all", async () => {
+    // company.domain is `shop.test:8443` here, and `hostname` would drop the port, so comparing
+    // hostnames refused a profile served from the very origin discovery validated.
+    const company = await agentWith(
+      hostedAt({
+        host: "shop.test:8443",
+        version: "1.0",
+        domain: "shop.test:8443",
+        extensions: { ucp: [{ version: "1" }] },
+      }),
+    ).discover("shop.test:8443");
+    expect(company.ucp?.profileUrl).toBe("https://shop.test:8443/.well-known/ucp");
+    const user = await new PoppyAgent({
+      clientId: CLIENT_ID,
+      signingKey: { privateKey: AGENT_KEY.privateKey, kid: "k1" },
+      fetch: hostedAt({
+        host: "shop.test:8443",
+        version: "1.0",
+        domain: "shop.test:8443",
+        extensions: { ucp: [{ version: "1" }] },
+      }),
+    }).user(company, "alice");
+    expect(
+      () =>
+        new UcpClient({
+          negotiation: negotiationFrom("https://shop.test:8443/.well-known/ucp"),
+          profileUrl: "https://agent.example/ucp.json",
+          session: user.session(),
+        }),
+    ).not.toThrow();
+  });
+
+  it("refuses a UCP profile from another port of the Company's host", async () => {
+    // Another port is another origin, and the old hostname comparison let this through.
+    const mock = await MockCompany.create({ version: "0.4", poppy: listsUcp });
+    const agent = agentWith(mock.fetch);
+    const company = await agent.discover("example.com");
+    const user = await agent.user(company, "alice");
+    expect(
+      () =>
+        new UcpClient({
+          negotiation: negotiationFrom("https://example.com:8443/.well-known/ucp"),
+          profileUrl: "https://agent.example/ucp.json",
+          session: user.session(),
+        }),
+    ).toThrow(/isn't from example\.com/);
+  });
+
+  it("leaves no pending sign-in behind when the push is refused", async () => {
+    // The record holds the PKCE verifier, and the caller only indexes `state` once startDirect
+    // resolves — so one written before a failed push would sit in no index until the store was
+    // cleared by hand (spec 4.2).
+    const mock = await MockCompany.create({ version: "1.0", par: "required" });
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.href === `${ISSUER}/par`)
+        return new Response(JSON.stringify({ error: "invalid_request" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      return mock.fetch(input, init);
+    }) as typeof fetch;
+    const written: string[] = [];
+    const store = new MemoryStore();
+    const recording: Store = {
+      get: (key) => store.get(key),
+      set: async (key, value) => {
+        written.push(key);
+        await store.set(key, value);
+      },
+      delete: (key) => store.delete(key),
+    };
+    const agent = new PoppyAgent({
+      clientId: CLIENT_ID,
+      signingKey: { privateKey: AGENT_KEY.privateKey, kid: "k1" },
+      fetch: fetchFn,
+      store: recording,
+      redirectUri: "https://agent.example/callback",
+    });
+    const company = await agent.discover("example.com");
+    const user = await agent.user(company, "alice");
+    await expect(user.startDirectSignIn({ scope: "orders:read" })).rejects.toThrow();
+    expect(written.filter((key) => key.startsWith(PENDING_PREFIX))).toEqual([]);
   });
 });

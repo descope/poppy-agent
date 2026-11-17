@@ -1,6 +1,14 @@
 import type { Company } from "./discovery.ts";
 import { PoppyError, PoppyProtocolError, parseRetryAfter } from "./errors.ts";
-import { checkPublicHost, type Fetch, getJson, httpsUrl, isObject, isRedirect } from "./http.ts";
+import {
+  checkPublicHost,
+  type Fetch,
+  getJson,
+  httpsUrl,
+  isObject,
+  isRedirect,
+  originOf,
+} from "./http.ts";
 import { randomId, type Signer } from "./jose.ts";
 import { addSignature } from "./operator.ts";
 import type { Session } from "./session.ts";
@@ -406,8 +414,12 @@ export class UcpClient {
         throw new PoppyProtocolError(
           `${company.domain} doesn't list the UCP extension, so UCP requests can't use its Session`,
         );
-      // A profile from another host doesn't apply to this Company (UCP extension 3).
-      if (new URL(options.negotiation.business.url).hostname !== company.domain)
+      // A profile from another host doesn't apply to this Company (UCP extension 3). Compared as
+      // origins, not hostnames: from 1.0 `company.domain` carries its port when that isn't 443
+      // (spec 3.1), and `hostname` drops it, so every 1.0 Company on another port would fail a
+      // profile served from its own origin. `originOf` is also what `parseUcp` builds the profile
+      // URL with, so the two agree by construction.
+      if (new URL(options.negotiation.business.url).origin !== originOf(company.domain))
         throw new PoppyProtocolError(`the UCP profile isn't from ${company.domain}`);
       session.addExtensionEndpoint(options.negotiation.restEndpoint);
     }
