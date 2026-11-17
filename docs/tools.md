@@ -48,7 +48,7 @@ const tools = poppyTools({
   user,
   // Called when the Company asks for an operation to be approved.
   requestApproval: async ({ company, summaryHtml, mustAskUser }) =>
-    myUi.confirm(`${company.name} (${company.domain}) asks you to approve`, summaryHtml),
+    myUi.confirm(`${companyLabel(company)} asks you to approve`, summaryHtml),
   // Called when a request or the Company Agent needs the User's account.
   signIn: async ({ company, user, scope }) => {
     const device = await user.startDeviceSignIn({ scope });
@@ -63,7 +63,7 @@ const tools = poppyTools({
 ```
 
 - **Without `requestApproval`**, the tools never approve anything. A request that needs approval returns `performed: false` with the operation, so the model can tell the User.
-- **With it**, the tools show the User the Company's name and the summary as safe HTML, and send the approval only if they say yes. The Company performs the action at most once. Returning `true` means the User approved; return `{ approver: "agent" }` instead to state that your agent approved on an instruction the User had already given it, which you must have checked the terms against.
+- **With it**, the tools hand you the Company and the summary as safe HTML, and send the approval only if the User says yes. Name the Company with `companyLabel(company)`, which shows the verified domain and quotes the name the Company chose beside it, bounded and stripped of line breaks — a Company writes `organization.name` itself (spec 10.1). The Company performs the action at most once. Returning `true` means the User approved; return `{ approver: "agent" }` instead to state that your agent approved on an instruction the User had already given it, which you must have checked the terms against.
 - `mustAskUser` is true for terms the Company returned in answer to an agent approval. Only the User can approve those, so an agent approval offered for them is refused and the result says the action wasn't performed.
 - A **declined** approval comes back as `performed: false` with `declined`, not as an error. Nothing happened, and the tools never send that approval again. Any `reason` or `alternative` is the Company's own wording, passed to the model as content.
 - **Without `signIn`**, results say which scopes are needed, and sign-in is up to you.

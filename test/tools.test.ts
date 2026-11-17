@@ -10,7 +10,7 @@ import {
   toMcpTools,
   toOpenAITools,
 } from "../src/index.ts";
-import { API, CLIENT_ID, MockCompany, type MockOptions } from "./mock-company.ts";
+import { API, CLIENT_ID, DOMAIN, MockCompany, type MockOptions } from "./mock-company.ts";
 
 async function setup(options: MockOptions = {}, operationsVersion = "2") {
   const mock = await MockCompany.create(options);
@@ -137,6 +137,10 @@ describe("poppyTools", () => {
       },
     });
     expect(String(result["note"])).toContain("Do not send this approval again");
+    // The note is prose a model reads, so it names the Company by the domain that was verified. A
+    // Company writes `organization.name` itself, and it belongs in a data position (spec 10.1).
+    expect(String(result["note"])).toContain(DOMAIN);
+    expect(String(result["note"])).not.toContain("Example Company");
     // Declined once and never sent again (Operations section 7).
     expect(mock.approvals.filter((a) => a?.["approver"] === "agent")).toHaveLength(1);
   });
