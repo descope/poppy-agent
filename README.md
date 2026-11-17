@@ -73,11 +73,11 @@ Signed out, a request carries only the Session header, which says which Personal
 ## Installation
 
 ```bash
-npm install @descope/poppy
+npm install @descope/poppy-agent
 # or
-pnpm add @descope/poppy
+pnpm add @descope/poppy-agent
 # or
-yarn add @descope/poppy
+yarn add @descope/poppy-agent
 ```
 
 The package isn't published to npm yet. Until it is, install it from this repository.
@@ -87,7 +87,7 @@ The package isn't published to npm yet. Until it is, install it from this reposi
 Here is what a Personal Agent looks like. It finds a Company, asks its Company Agent a question while signed out, and calls an API, signing the User in when the API asks for their account:
 
 ```typescript
-import { PoppyAgent, scopesNeeded } from "@descope/poppy";
+import { PoppyAgent, scopesNeeded } from "@descope/poppy-agent";
 
 const agent = new PoppyAgent({
   clientId: "https://agent.example.net/agent.json",
@@ -125,7 +125,7 @@ Using an LLM framework? Hand the Company to your model as tools:
 
 ```typescript
 import { generateText, jsonSchema, tool } from "ai";
-import { poppyTools, toAiSdkTools } from "@descope/poppy";
+import { poppyTools, toAiSdkTools } from "@descope/poppy-agent";
 
 const tools = toAiSdkTools(poppyTools({ user, requestApproval, signIn }), { tool, jsonSchema });
 ```

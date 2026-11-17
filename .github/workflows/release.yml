@@ -10,7 +10,7 @@ permissions:
 jobs:
   # Every push to main publishes a throwaway version under the `next` tag, so a fix can be
   # installed before it is released. Versions look like 0.0.0-next-1a2b3c4d-20261117, which
-  # sorts below any real release, so `npm install @descope/poppy` never picks one up.
+  # sorts below any real release, so `npm install @descope/poppy-agent` never picks one up.
   #
   # This job fails until the package exists on npm: trusted publishing can configure a
   # publisher only for a package that is already there, so the first publish has to be done
