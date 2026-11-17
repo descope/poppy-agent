@@ -200,6 +200,9 @@ describe("checkSite", () => {
         ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>),
       };
       delete poppy["apis"];
+      // `extensions` goes too: an extension is itself a surface a Session reaches, so leaving
+      // the fixture's one in place would make every case below pass for the wrong reason.
+      delete poppy["extensions"];
       documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, ...doc };
       return documents;
     }
@@ -307,6 +310,59 @@ describe("checkSite", () => {
       const result = byId(await check(conformingSite()), "surface.session-usable");
       expect(result?.ok).toBe(true);
       expect(result?.detail).toContain("apis");
+    });
+
+    // GoFundMe's shape: the domain names an issuer, and `auth.disabled` says agents get no
+    // sign-in from it (3.2). Nothing is promised, so a bare `web: {}` strands nothing, and
+    // `PoppyUser` refuses to start sign-in here — warning would be noise.
+    it("passes a document whose auth is disabled, however bare the rest is", async () => {
+      const results = await check(surfaced({ auth: { issuer: ISSUER, disabled: true }, web: {} }));
+      const usable = byId(results, "surface.session-usable");
+      expect(usable?.ok).toBe(true);
+      expect(usable?.detail).toContain("auth.disabled");
+      // The same gate spares the scope check, for the same reason.
+      const described = byId(results, "discovery.scopes-described");
+      expect(described?.ok).toBe(true);
+      expect(described?.detail).toContain("auth.disabled");
+    });
+
+    // 0.4 moved excluded tasks, the skill index and feedback here, and agents read it once per
+    // Session (9), so an endpoint is somewhere a Session goes.
+    it("passes a site whose only surface is a tasks endpoint", async () => {
+      const result = byId(
+        await check(surfaced({ tasks: { endpoint: `${ORIGIN}/poppy/tasks` }, web: {} })),
+        "surface.session-usable",
+      );
+      expect(result?.ok).toBe(true);
+      expect(result?.detail).toContain("tasks.endpoint");
+    });
+
+    // `parseDiscovery` reads `tasks.endpoint` through `optionalUrl`, and only off 0.3.
+    it("does not count a tasks endpoint the SDK would yield nothing from", async () => {
+      const notHttps = await check(
+        surfaced({ tasks: { endpoint: "http://shop.test/t" }, web: {} }),
+      );
+      expect(byId(notHttps, "surface.session-usable")?.ok).toBe(false);
+    });
+
+    // The reference validator counts any extension, and so does this: a few use Sessions, and
+    // nothing here can tell which, so it declines to warn rather than warn wrongly.
+    it("counts an extension as somewhere a Session goes", async () => {
+      const result = byId(
+        await check(surfaced({ extensions: { "shop.test/loyalty": [{ version: "1" }] }, web: {} })),
+        "surface.session-usable",
+      );
+      expect(result?.ok).toBe(true);
+      expect(result?.detail).toContain("extensions");
+    });
+
+    // Off 0.3 `parseExtensions` wants a list, so a bare object yields no extension at all.
+    it("does not count an extension in a shape this version does not read", async () => {
+      const result = byId(
+        await check(surfaced({ extensions: { "shop.test/loyalty": { version: "1" } }, web: {} })),
+        "surface.session-usable",
+      );
+      expect(result?.ok).toBe(false);
     });
 
     // An empty list is not a surface, however much it looks like one in the document.

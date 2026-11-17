@@ -289,16 +289,25 @@ export async function checkSite(
     auth["device"] === undefined,
     auth["device"] === undefined ? "absent" : "auth.device is present — removed after 0.1",
   );
+  // `auth.disabled` is the Company saying it offers Personal Agents no sign-in at all, even
+  // though it has an issuer (3.2) — `PoppyUser` refuses to start one (`account.ts`). Nothing
+  // that depends on a User signing in applies to such a Company, here or at the Session rule
+  // below, so both ask this first. GoFundMe publishes exactly this shape.
+  const signInDisabled = auth["disabled"] === true;
+
   const scopes = isObject(auth["scopes"]) ? auth["scopes"] : undefined;
+  const described = scopes !== undefined && Object.keys(scopes).length > 0;
   add(
     ctx,
     "discovery.scopes-described",
     "SHOULD",
     "4.7",
-    scopes !== undefined && Object.keys(scopes).length > 0,
-    scopes !== undefined && Object.keys(scopes).length > 0
-      ? `${Object.keys(scopes).length} described`
-      : "auth.scopes absent — the user reads these when approving",
+    signInDisabled || described,
+    signInDisabled
+      ? "auth.disabled — no sign-in is offered, so there are no scopes to describe"
+      : described
+        ? `${Object.keys(scopes).length} described`
+        : "auth.scopes absent — the user reads these when approving",
   );
 
   // Plain names are reserved for the protocol, which defines the few in PROTOCOL_EXTENSIONS;
@@ -536,6 +545,13 @@ export async function checkSite(
   // types this version doesn't read leaves `Company.apis` empty, an `agent` without a `poppy`
   // protocol yields no conversation endpoint, and a join URL that isn't https rejects the
   // document outright.
+  //
+  // The set is the one the reference validator's `website-only` message names — agent, apis,
+  // tasks, web.browser_session_endpoint or an extension. The last two matter here: 0.4 moved
+  // excluded tasks, the skill index and feedback to `tasks.endpoint`, which agents read once per
+  // Session (9), and some extensions use Sessions. Nothing here can tell which do, so any
+  // extension counts: for a SHOULD, a warning missed costs less than one raised against a
+  // Company that is doing nothing wrong.
   const web = isObject(doc["web"]) ? doc["web"] : undefined;
   const agent = isObject(doc["agent"]) ? doc["agent"] : undefined;
   const spends: string[] = [];
@@ -551,22 +567,41 @@ export async function checkSite(
     agent["protocols"].some((protocol) => isObject(protocol) && protocol["type"] === "poppy")
   )
     spends.push("agent");
+  // `parseDiscovery` reads `tasks.endpoint` through `optionalUrl`, and only off 0.3.
+  const tasks = isObject(doc["tasks"]) ? doc["tasks"] : undefined;
+  const tasksEndpoint = tasks?.["endpoint"];
+  if (
+    version !== "0.3" &&
+    typeof tasksEndpoint === "string" &&
+    httpsOrUndefined(tasksEndpoint) !== undefined
+  )
+    spends.push("tasks.endpoint");
   const join = web?.["browser_session_endpoint"];
   if (typeof join === "string" && httpsOrUndefined(join) !== undefined)
     spends.push("web.browser_session_endpoint");
+  // In the shape this version's `parseExtensions` reads: a list off 0.3, a single object on it.
+  if (
+    Object.values(isObject(doc["extensions"]) ? doc["extensions"] : {}).some((entry) =>
+      version === "0.3" ? isObject(entry) : Array.isArray(entry) && entry.length > 0,
+    )
+  )
+    spends.push("extensions");
   add(
     ctx,
     "surface.session-usable",
     "SHOULD",
     "3.1",
-    issuer === "" || spends.length > 0,
+    issuer === "" || signInDisabled || spends.length > 0,
     issuer === ""
       ? "no issuer, so no Session is promised"
-      : spends.length > 0
-        ? `a Session reaches: ${spends.join(", ")}`
-        : "the domain names an issuer with no apis, no agent and no web.browser_session_endpoint — " +
-          "an agent that signs the User in has nowhere to use the Session, so it signs them " +
-          "in through the browser instead and ignores this document",
+      : signInDisabled
+        ? "auth.disabled — the Company offers no sign-in, so no Session is promised"
+        : spends.length > 0
+          ? `a Session reaches: ${spends.join(", ")}`
+          : "the domain names an issuer with no apis, agent, tasks.endpoint, " +
+            "browser_session_endpoint or extension — an agent that signs the User in has " +
+            "nowhere to use the Session, so it signs them in through the browser instead " +
+            "and ignores this document",
   );
 
   // ---- every API the document advertises -----------------------------------------------------
