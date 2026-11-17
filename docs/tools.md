@@ -74,7 +74,7 @@ The model can't skip these steps: approval and sign-in only happen inside your c
 ```typescript
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, jsonSchema, stepCountIs, tool } from "ai";
-import { poppyTools, toAiSdkTools } from "@descope/poppy";
+import { poppyTools, toAiSdkTools } from "@descope/poppy-agent";
 
 const { text } = await generateText({
   model: anthropic("claude-sonnet-5-5"),
@@ -90,7 +90,7 @@ Passing `tool` and `jsonSchema` in keeps this package free of a dependency on `a
 
 ```typescript
 import Anthropic from "@anthropic-ai/sdk";
-import { poppyTools, runTool, toAnthropicTools } from "@descope/poppy";
+import { poppyTools, runTool, toAnthropicTools } from "@descope/poppy-agent";
 
 const client = new Anthropic();
 const tools = poppyTools({ user, requestApproval, signIn });
@@ -129,7 +129,7 @@ for (;;) {
 
 ```typescript
 import { Server } from "@modelcontextprotocol/server";
-import { poppyTools, toMcpTools } from "@descope/poppy";
+import { poppyTools, toMcpTools } from "@descope/poppy-agent";
 
 const mcpTools = toMcpTools(poppyTools({ user, requestApproval, signIn }));
 const server = new Server({ name: "my-agent", version: "1.0.0" }, { capabilities: { tools: {} } });

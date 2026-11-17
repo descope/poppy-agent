@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "@descope/poppy",
+      "package-name": "@descope/poppy-agent",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true
     }

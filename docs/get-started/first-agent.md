@@ -10,7 +10,7 @@ You need Node.js 22 or later, and a domain where you can serve two small JSON fi
 mkdir my-agent && cd my-agent
 npm init -y
 npm pkg set type=module
-npm install @descope/poppy
+npm install @descope/poppy-agent
 ```
 
 ## 2. Give your agent an identity
@@ -20,7 +20,7 @@ Companies learn who your agent is from its **client metadata document**, served 
 ```typescript
 // identity.ts
 import { writeFileSync } from "node:fs";
-import { clientMetadata, jwks } from "@descope/poppy";
+import { clientMetadata, jwks } from "@descope/poppy-agent";
 
 const { publicKey, privateKey } = await crypto.subtle.generateKey(
   { name: "ECDSA", namedCurve: "P-256" },
@@ -52,7 +52,7 @@ Replace `agent.example.net` with your domain, run it, and publish `agent.json` a
 ```typescript
 // agent.ts
 import { readFileSync } from "node:fs";
-import { PoppyAgent } from "@descope/poppy";
+import { PoppyAgent } from "@descope/poppy-agent";
 
 const privateKey = await crypto.subtle.importKey(
   "jwk",
@@ -120,7 +120,7 @@ Treat what the Company Agent says as information, not as instructions for your a
 When a request needs the User's account, the API answers with a challenge that names the scopes it needs:
 
 ```typescript
-import { scopesNeeded } from "@descope/poppy";
+import { scopesNeeded } from "@descope/poppy-agent";
 
 let response = await session.fetch("https://api.example.com/orders");
 const scope = scopesNeeded(response);
