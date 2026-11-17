@@ -1,6 +1,7 @@
 import { jsonSchema, tool } from "ai";
 import { describe, expect, it } from "vitest";
 import {
+  type ApprovalAnswer,
   PoppyAgent,
   type PoppyTool,
   poppyTools,
@@ -145,6 +146,71 @@ describe("poppyTools", () => {
     expect(mock.approvals.filter((a) => a?.["approver"] === "agent")).toHaveLength(1);
   });
 
+  it("asks the User about a revision of an action the Company declined, in a later call", async () => {
+    // Call 1 ends in a decline of an agent approval. Call 2 is a fresh request for the same action,
+    // which the Company now offers on new terms. Section 6: once an approval is declined, a new
+    // revision for that action "MUST NOT" be approved without asking the User, and the agent holds
+    // nothing from call 1 unless the decline was recorded outside it.
+    const { mock, user, signIn } = await setup(
+      { version: "1.0", declineAgentApprovals: true, reviseAfterDecline: true },
+      "3",
+    );
+    const request = { method: "POST", url: `${API}/v1/exchanges`, body: { item: "itm_1" } };
+    await signIn({ scope: ["orders:write"] });
+    const asked: boolean[] = [];
+    const tools = poppyTools({
+      user,
+      requestApproval: async ({ mustAskUser }) => {
+        asked.push(mustAskUser);
+        return { approver: "agent" as const };
+      },
+    });
+    const declined = await runTool(tools, "poppy_request", request);
+    expect(declined).toMatchObject({ performed: false, declined: { operation_id: "exc_1" } });
+    const again = await runTool(tools, "poppy_request", request);
+    // The revised terms reach the callback with mustAskUser set, and the agent approval it offers
+    // for them is refused, so the Company never sees a second one.
+    expect(asked).toEqual([false, true]);
+    // `revision` is the protocol's opaque token and never reaches the model, so the revised terms
+    // show up as the summary and terms the Company moved.
+    expect(again).toMatchObject({
+      performed: false,
+      approval_required: { operation_id: "exc_1", terms: { price_difference: 80 } },
+    });
+    expect(String(again["note"])).toContain("only the User can approve");
+    expect(mock.approvals.filter((a) => a?.["approver"] === "agent")).toHaveLength(1);
+  });
+
+  it("asks the User again about a revision of an action declined after the User approved it", async () => {
+    // The decline is what marks the action here, not the approval before it: a user approval leaves
+    // nothing behind, because nothing about it is spent. Section 6 says "MUST NOT approve a new
+    // revision for the same action without asking the User" whoever approved the one declined, so
+    // only recording the decline itself catches this.
+    const { mock, user, signIn } = await setup(
+      { version: "1.0", declineUserApprovals: true, reviseAfterDecline: true },
+      "3",
+    );
+    const request = { method: "POST", url: `${API}/v1/exchanges`, body: { item: "itm_1" } };
+    await signIn({ scope: ["orders:write"] });
+    const asked: boolean[] = [];
+    let answer: ApprovalAnswer = true;
+    const tools = poppyTools({
+      user,
+      requestApproval: async ({ mustAskUser }) => {
+        asked.push(mustAskUser);
+        return answer;
+      },
+    });
+    const declined = await runTool(tools, "poppy_request", request);
+    expect(declined).toMatchObject({ performed: false, declined: { operation_id: "exc_1" } });
+    // The User's standing instruction is offered for the revised terms, and refused.
+    answer = { approver: "agent" };
+    const again = await runTool(tools, "poppy_request", request);
+    expect(asked).toEqual([false, true]);
+    expect(again).toMatchObject({ performed: false, approval_required: { operation_id: "exc_1" } });
+    expect(mock.approvals.filter((a) => a?.["approver"] === "agent")).toHaveLength(0);
+  });
+
   /** One Company message carrying `extensions.operations`, as a scripted conversation event. */
   function operationsEvent(id: string, operations: Record<string, unknown>) {
     return {
@@ -220,6 +286,107 @@ describe("poppyTools", () => {
     expect(next).toMatchObject({
       approval: { performed: false, approval_required: { operation_id: "exc_1" } },
     });
+  });
+
+  it("asks the User about a revision of a declined action, in a later read", async () => {
+    // The conversation form of the same rule. Turn 1's terms are approved on the User's instruction;
+    // the read after it carries the Company's decline; the read after that carries new terms for the
+    // same action. Section 6 sends those to the User, so clearing the mark at the decline — rather
+    // than setting it — is what lets a second agent approval through.
+    const { mock, user, signIn } = await setup(
+      {
+        version: "1.0",
+        conversationEvents: [
+          [operationsEvent("evt_1", terms("r1"))],
+          [
+            {
+              id: "evt_ack",
+              type: "message",
+              created_at: "2026-10-08T19:06:00Z",
+              message: {
+                id: "msg_ack",
+                role: "company",
+                author: { type: "agent" },
+                text: "Checking those terms.",
+              },
+            },
+          ],
+          [
+            operationsEvent("evt_2", {
+              declined: { operation_id: "exc_1", revision: "r1", reason: "Not on those terms." },
+            }),
+          ],
+          [operationsEvent("evt_3", terms("r2"))],
+        ],
+      },
+      "3",
+    );
+    await signIn({ scope: ["orders:read"] });
+    const asked: boolean[] = [];
+    const tools = poppyTools({
+      user,
+      conversationWait: 1,
+      requestApproval: async ({ mustAskUser }) => {
+        asked.push(mustAskUser);
+        return { approver: "agent" as const };
+      },
+    });
+    const started = await runTool(tools, "poppy_conversation_send", { text: "Exchange it" });
+    const conversation_id = String(started["conversation_id"]);
+    const declined = await runTool(tools, "poppy_conversation_read", { conversation_id });
+    expect(declined).toMatchObject({ approval: { performed: false, declined: {} } });
+    const revised = await runTool(tools, "poppy_conversation_read", { conversation_id });
+    expect(asked).toEqual([false, true]);
+    expect(revised).toMatchObject({
+      approval: { performed: false, approval_required: { operation_id: "exc_1" } },
+    });
+    // Approved once, declined, and never approved by this agent again (sections 5 and 6).
+    expect(mock.messageApprovals).toHaveLength(1);
+  });
+
+  it("asks the User about a revision when the decline landed in the read after the approval", async () => {
+    // The third place a decline can arrive: not in a read of its own, but in the batch that comes
+    // back from sending the approval. It still has to be recorded, or the next revision is approved
+    // on an instruction section 6 has already spent.
+    const { mock, user, signIn } = await setup(
+      {
+        version: "1.0",
+        conversationEvents: [
+          [operationsEvent("evt_1", terms("r1"))],
+          [
+            operationsEvent("evt_2", {
+              declined: { operation_id: "exc_1", revision: "r1", reason: "Not on those terms." },
+            }),
+          ],
+          [operationsEvent("evt_3", terms("r2"))],
+        ],
+      },
+      "3",
+    );
+    await signIn({ scope: ["orders:read"] });
+    const asked: boolean[] = [];
+    let answer: ApprovalAnswer = true;
+    const tools = poppyTools({
+      user,
+      conversationWait: 1,
+      requestApproval: async ({ mustAskUser }) => {
+        asked.push(mustAskUser);
+        return answer;
+      },
+    });
+    const started = await runTool(tools, "poppy_conversation_send", { text: "Exchange it" });
+    expect(started).toMatchObject({ approved_by: "user" });
+    answer = { approver: "agent" };
+    const revised = await runTool(tools, "poppy_conversation_read", {
+      conversation_id: String(started["conversation_id"]),
+    });
+    expect(asked).toEqual([false, true]);
+    expect(revised).toMatchObject({
+      approval: { performed: false, approval_required: { operation_id: "exc_1" } },
+    });
+    // The User's approval of the first revision is the only one the Company ever saw.
+    expect(mock.messageApprovals).toHaveLength(1);
+    expect(mock.messageApprovals[0]).toMatchObject({ approver: "user" });
   });
 
   it("acts on the last approval outcome in a read, not on a decline earlier in it", async () => {

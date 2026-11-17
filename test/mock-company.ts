@@ -68,6 +68,17 @@ export interface MockOptions {
   /** Decline an agent approval rather than performing the action (Operations extension section 6). */
   declineAgentApprovals?: boolean;
   /**
+   * Decline a user approval the same way. Section 6's rule about what may follow a decline doesn't
+   * turn on who approved, so this is the case that tells the two halves of the rule apart.
+   */
+  declineUserApprovals?: boolean;
+  /**
+   * With `declineAgentApprovals`, offer a new revision of the same action once one has been declined,
+   * as a Company that declined on price and then moved the price does. Section 6 sends that revision
+   * to the User, so it is how an agent gets caught approving on the spent instruction.
+   */
+  reviseAfterDecline?: boolean;
+  /**
    * Answer every approval with a new revision of the same operation, as a Company whose own terms
    * changed does when check 3 fails (Operations section 6). It never performs the exchange.
    */
@@ -164,6 +175,8 @@ export class MockCompany {
   /** Fail the next resource request with invalid_token. */
   rejectNextToken = false;
   #counter = 0;
+  /** Set once an agent approval of the exchange has been declined, for `reviseAfterDecline`. */
+  #declinedExchange = false;
   #reads = 0;
   readonly #endedSids = new Set<string>();
   #nonceIssued = false;
@@ -399,7 +412,11 @@ export class MockCompany {
         }
         if (approval?.["operation_id"] === "exc_1" && approval["revision"] === "r1") {
           // A Company MAY decline for its own reasons, such as the approver (Operations section 6).
-          if (this.options.declineAgentApprovals === true && approval["approver"] === "agent")
+          const declines =
+            (this.options.declineAgentApprovals === true && approval["approver"] === "agent") ||
+            (this.options.declineUserApprovals === true && approval["approver"] === "user");
+          if (declines) {
+            this.#declinedExchange = true;
             return json(403, {
               error: "approval_declined",
               operation_id: "exc_1",
@@ -410,15 +427,21 @@ export class MockCompany {
                 references: [{ type: "web", url: `https://${DOMAIN}/exchange` }],
               },
             });
+          }
           return json(201, { exchanged: true });
         }
+        // Revised terms for the action it declined: the same operation_id with a new revision, which
+        // is how new terms for one action always arrive (Operations section 3).
+        const revised = this.#declinedExchange && this.options.reviseAfterDecline === true;
         return json(403, {
           error: "approval_required",
           operation: {
             operation_id: "exc_1",
-            revision: "r1",
-            summary: "Exchange the jacket for **$70** more. [Details](https://evil.test)",
-            terms: { price_difference: 70 },
+            revision: revised ? "r2" : "r1",
+            summary: revised
+              ? "Exchange the jacket for **$80** more."
+              : "Exchange the jacket for **$70** more. [Details](https://evil.test)",
+            terms: { price_difference: revised ? 80 : 70 },
             expires_at: "2099-01-01T00:00:00Z",
           },
         });

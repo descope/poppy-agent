@@ -211,11 +211,21 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
   const wait = options.conversationWait ?? 20;
   const conversations = new Map<string, Conversation>();
   /**
-   * Conversations whose last approval this agent gave on the User's instruction (Operations 5). The
-   * Company's answer to one can arrive in any later read, so this outlives the call that sent it: a
-   * new revision that answers an agent approval goes to the User, never to the same instruction.
+   * Operations whose next revision only the User can approve, by `operation_id`. An action gets in
+   * two ways, and the spec draws both to the same place: this agent approved it on the User's
+   * instruction, so the revision answering that goes to the User rather than to the same instruction
+   * (Operations 5); or the Company declined an approval of it, after which "the Personal Agent MUST
+   * NOT send that approval again, and MUST NOT approve a new revision for the same action without
+   * asking the User" (6). A user approval of a later revision takes it back out: the User was asked,
+   * which is all either rule wants.
+   *
+   * It is keyed by operation rather than by conversation or request because that is the unit the
+   * spec speaks in — new terms for an action are "the same `operation_id` with a new `revision`" (3)
+   * — and because the Company's answer can arrive anywhere: a later read, a later tool call, or the
+   * read that follows the approval. Anything narrower than this closure loses it at the call
+   * boundary, which is the mistake this held three times before it stayed fixed.
    */
-  const agentApproved = new Set<string>();
+  const needsUserApproval = new Set<string>();
   // On 0.4 the Company's excluded tasks, skills and feedback endpoint come from one request in this
   // Session, so which of them exist isn't known until it answers (spec section 9). The tools that use
   // them are offered whenever the Company could publish them, and resolve the answer when they run.
@@ -238,8 +248,9 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
 
   /**
    * Asks the app for an approval of this revision, or undefined when it isn't approved. `mustAskUser`
-   * marks a revision that answered an agent approval: section 5 forbids approving it on the same
-   * instruction, so an agent approval is refused here rather than sent.
+   * marks a revision that answered an agent approval, or that revises an action the Company declined:
+   * sections 5 and 6 both send those to the User, so an agent approval is refused here rather than
+   * sent. The callback is still asked, so the app can put the terms in front of the User.
    */
   async function approve(operation: Operation, mustAskUser = false): Promise<Approval | undefined> {
     if (options.requestApproval === undefined) return undefined;
@@ -367,13 +378,20 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
         const outcome = await outcomeFromResponse(response, company);
         if (outcome === undefined) break;
         await response.body?.cancel();
-        if (outcome.type === "approval_declined") return declinedForModel(outcome.decline);
-        // New terms that answer an agent approval can't be approved on the same instruction, so only
-        // the User can approve them (Operations section 5).
-        const mustAskUser = approval?.approver === "agent";
+        if (outcome.type === "approval_declined") {
+          // The Company's last word on that approval. Mark the action before returning: the model
+          // may call this tool again, and a new revision of it then needs the User (Operations 6).
+          needsUserApproval.add(outcome.decline.operationId);
+          return declinedForModel(outcome.decline);
+        }
+        // New terms that answer an agent approval, or any revision of an action already declined,
+        // can only be approved by the User (Operations sections 5 and 6).
+        const mustAskUser = needsUserApproval.has(outcome.operation.operationId);
         if (round >= 2) return notApproved(outcome.operation, mustAskUser);
         approval = await approve(outcome.operation, mustAskUser);
         if (approval === undefined) return notApproved(outcome.operation, mustAskUser);
+        if (approval.approver === "agent") needsUserApproval.add(approval.operationId);
+        else needsUserApproval.delete(approval.operationId);
         // The same request with the approval: the Company performs it at most once (Operations 6, 7).
         response = await session.fetch(url, { ...init, approval });
       }
@@ -402,6 +420,17 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
     return events;
   }
 
+  /** The last message in these events carrying an operation or a decline (Operations 4, 6). */
+  function latestApprovalMessage(events: ConversationEvent[]) {
+    return events
+      .flatMap((e) =>
+        e.type === "message" && (e.message.declined ?? e.message.operation) !== undefined
+          ? [e.message]
+          : [],
+      )
+      .at(-1);
+  }
+
   async function conversationResult(
     conversation: Conversation,
     events: ConversationEvent[],
@@ -424,29 +453,24 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
     // Whichever came last is where the conversation stands. A decline of one action can be followed
     // by new terms for another, and the cursor has moved past both, so taking the decline and
     // returning would lose the operation for good (Operations 4, 6).
-    const latest = events
-      .flatMap((e) =>
-        e.type === "message" && (e.message.declined ?? e.message.operation) !== undefined
-          ? [e.message]
-          : [],
-      )
-      .at(-1);
+    const latest = latestApprovalMessage(events);
     // A decline is the Company's last word on that approval (Operations 6): nothing more to approve.
     if (latest?.declined !== undefined) {
       result["approval"] = declinedForModel(latest.declined);
-      // The instruction an agent approval rested on is spent: a new revision goes to the User (5).
-      agentApproved.delete(conversation.id);
+      // Mark the action rather than clearing it. A decline is the one moment the Company has pushed
+      // back, so revised terms for it are exactly what section 6 sends to the User.
+      needsUserApproval.add(latest.declined.operationId);
       return result;
     }
     const operation = latest?.operation;
     if (operation !== undefined) {
-      // These terms may answer an agent approval sent in an earlier call, whose response arrived in
-      // this read. Section 5 forbids approving them on that same instruction.
-      const mustAskUser = agentApproved.has(conversation.id);
+      // These terms may answer an agent approval sent in an earlier call, or revise an action the
+      // Company declined. Either way only the User can approve them (sections 5 and 6).
+      const mustAskUser = needsUserApproval.has(operation.operationId);
       const approval = await approve(operation, mustAskUser);
       if (approval !== undefined) {
-        if (approval.approver === "agent") agentApproved.add(conversation.id);
-        else agentApproved.delete(conversation.id);
+        if (approval.approver === "agent") needsUserApproval.add(operation.operationId);
+        else needsUserApproval.delete(operation.operationId);
         const update = await conversation.send({
           text:
             approval.approver === "user"
@@ -455,6 +479,10 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
           approval,
         });
         const after = await collect(conversation, update);
+        // The Company can decline in the very read that follows the approval. Mark it here too, so
+        // the next revision of the action goes to the User whoever approved this one (6).
+        const declined = latestApprovalMessage(after)?.declined;
+        if (declined !== undefined) needsUserApproval.add(declined.operationId);
         return {
           ...result,
           approved_by: approval.approver,
