@@ -247,7 +247,7 @@ export function formatReport(report: ConformanceReport): string {
     return r.status === "pass" ? line : `${line}\n        ${r.details.join("\n        ")}`;
   });
   return [
-    `Personal Agent Protocol ${report.protocolVersions.join(" and ")} conformance: ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped`,
+    `Personal Agent Protocol ${report.protocolVersions.join(", ")} conformance: ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped`,
     ...lines,
   ].join("\n");
 }

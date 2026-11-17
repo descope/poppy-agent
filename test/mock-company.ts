@@ -23,11 +23,18 @@ const ES256 = { name: "ECDSA", hash: "SHA-256" } as const;
 const P256 = { name: "ECDSA", namedCurve: "P-256" } as const;
 const encoder = new TextEncoder();
 
+/** The protocol versions this Company can serve (spec 3.4). */
+export type MockVersion = "0.3" | "0.4" | "1.0";
+
 export interface MockOptions {
   /** The protocol version the Company serves in its poppy.json. Defaults to 0.3. */
-  version?: "0.3" | "0.4";
+  version?: MockVersion;
   /** Also serve the other version at {@link LINKED_DOC}, listed in `supported_versions` (spec 3.4). */
   linkOtherVersion?: boolean;
+  /** Which version {@link linkOtherVersion} serves, instead of the one this Company doesn't prefer. */
+  linkVersion?: MockVersion;
+  /** Name the pushed authorization endpoint, and require it when `"required"` (RFC 9126, spec 4.2). */
+  par?: "offered" | "required" | "required-without-endpoint";
   /** Change the linked document before it is served, to break one of spec 3.4's checks. */
   linkedDoc?: (doc: Record<string, unknown>) => Record<string, unknown>;
   /** Where `supported_versions` points, instead of {@link LINKED_DOC}. */
@@ -38,7 +45,7 @@ export interface MockOptions {
    * After the first version_unsupported, serve this version instead and stop refusing, as a Company
    * that has dropped a version does. The agent then discovers again and finds the new one (spec 3.4).
    */
-  versionAfterError?: "0.3" | "0.4";
+  versionAfterError?: MockVersion;
   /** The body the 0.4 tasks endpoint answers with (spec section 9). */
   tasks?: Record<string, unknown>;
   /** The tasks endpoint rate-limits instead of answering, which says nothing about later calls. */
@@ -106,6 +113,8 @@ export class MockCompany {
   readonly declaredVersions: (string | null)[] = [];
   readonly delegationJtis = new Set<string>();
   readonly codes = new Map<string, { challenge: string; scope: string[]; redirectUri: string }>();
+  /** Authorization requests pushed to `/par`, by the `request_uri` handed back (RFC 9126). */
+  readonly pushedRequests = new Map<string, URLSearchParams>();
   device: "pending" | "slow_down" | "approved" | "denied" = "pending";
   deviceScope: string[] = [];
   /** Fail the next resource request with invalid_token. */
@@ -128,16 +137,17 @@ export class MockCompany {
   }
 
   /** The version this Company serves, which its documents and checks follow (spec 3.4). */
-  get version(): "0.3" | "0.4" {
+  get version(): MockVersion {
     return this.options.version ?? "0.3";
   }
 
-  get #otherVersion(): "0.3" | "0.4" {
-    return this.version === "0.3" ? "0.4" : "0.3";
+  /** The version served at {@link LINKED_DOC}: `linkVersion`, or the other of the two older ones. */
+  get #otherVersion(): MockVersion {
+    return this.options.linkVersion ?? (this.version === "0.3" ? "0.4" : "0.3");
   }
 
   /** One version's document, without the `supported_versions` only poppy.json carries. */
-  document(version: "0.3" | "0.4" = this.version): Record<string, unknown> {
+  document(version: MockVersion = this.version): Record<string, unknown> {
     const mediated = {
       version: "1",
       fields: [
@@ -156,7 +166,17 @@ export class MockCompany {
           "orders:write": { changes: "something-new", personal_data: false },
         },
       },
-      agent: { protocols: [{ type: "poppy", endpoint: CONVERSATIONS, access: "signed_in" }] },
+      // From 1.0 every agent.protocols entry says what the agent there can help with (spec 8.1).
+      agent: {
+        protocols: [
+          {
+            type: "poppy",
+            endpoint: CONVERSATIONS,
+            access: "signed_in",
+            ...(version === "1.0" ? { description: "Anything about your orders" } : {}),
+          },
+        ],
+      },
       apis: [
         { type: "openapi", url: `${API}/openapi.json`, description: "Orders" },
         { type: "mcp", url: MCP, description: "Search" },
@@ -211,6 +231,17 @@ export class MockCompany {
       ...(this.options.tokenType === "DPoP"
         ? { dpop_signing_alg_values_supported: ["ES256"] }
         : {}),
+      // Pushed Authorization Requests, which 1.0 added to the issuer's metadata (spec 3.2, 4.2).
+      ...(this.options.par === undefined
+        ? {}
+        : {
+            ...(this.options.par === "required-without-endpoint"
+              ? {}
+              : { pushed_authorization_request_endpoint: `${ISSUER}/par` }),
+            ...(this.options.par === "offered"
+              ? {}
+              : { require_pushed_authorization_requests: true }),
+          }),
     };
   }
 
@@ -268,6 +299,15 @@ export class MockCompany {
         });
       case `${API}/openapi.json`:
         return json(200, { openapi: "3.1.0", servers: [{ url: `${API}/v1` }], paths: {} });
+      case `${ISSUER}/par`: {
+        // A pushed authorization request: the Company keeps the parameters and hands back a handle
+        // (RFC 9126 section 2.2), so nothing in the browser can change them.
+        const form = new URLSearchParams(body);
+        if (!(await this.#clientOk(form))) return json(401, { error: "invalid_client" });
+        const requestUri = `urn:ietf:params:oauth:request_uri:req_${++this.#counter}`;
+        this.pushedRequests.set(requestUri, form);
+        return json(201, { request_uri: requestUri, expires_in: 60 });
+      }
       case `${ISSUER}/token`:
         return this.#token(new URLSearchParams(body), headers);
       case `${ISSUER}/revoke`:
@@ -511,8 +551,12 @@ export class MockCompany {
     options: { iss?: string; deny?: boolean } = {},
   ): Promise<string> {
     const url = new URL(authorizeUrl);
-    const redirect = new URL(url.searchParams.get("redirect_uri") ?? "");
-    redirect.searchParams.set("state", url.searchParams.get("state") ?? "");
+    // A pushed request reaches the authorization endpoint as a handle; the Company reads the
+    // parameters it kept, which is the point of pushing them (RFC 9126 section 4).
+    const pushed = this.pushedRequests.get(url.searchParams.get("request_uri") ?? "");
+    const parameters = pushed ?? url.searchParams;
+    const redirect = new URL(parameters.get("redirect_uri") ?? "");
+    redirect.searchParams.set("state", parameters.get("state") ?? "");
     redirect.searchParams.set("iss", options.iss ?? ISSUER);
     if (options.deny) {
       redirect.searchParams.set("error", "access_denied");
@@ -520,9 +564,9 @@ export class MockCompany {
     }
     const code = `code_${++this.#counter}`;
     this.codes.set(code, {
-      challenge: url.searchParams.get("code_challenge") ?? "",
-      scope: (url.searchParams.get("scope") ?? "").split(" "),
-      redirectUri: url.searchParams.get("redirect_uri") ?? "",
+      challenge: parameters.get("code_challenge") ?? "",
+      scope: (parameters.get("scope") ?? "").split(" "),
+      redirectUri: parameters.get("redirect_uri") ?? "",
     });
     redirect.searchParams.set("code", code);
     return redirect.href;

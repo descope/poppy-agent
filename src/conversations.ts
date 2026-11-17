@@ -50,14 +50,18 @@ export interface Author {
   image?: string;
 }
 
-/** Facts about the User's situation (spec 8.4). Fields left out keep their previous values. */
+/**
+ * Facts about the User the Company can use while it answers (spec 8.4). Fields a later message leaves
+ * out keep their previous values; from 1.0 a field set to `null` clears it, as if it had never been
+ * shared, so a locale or a time zone can be taken back.
+ */
 export interface MessageContext {
-  /** RFC 5646 language tag, such as `en-US`. */
-  locale?: string;
-  /** IANA time zone name, such as `America/Los_Angeles`. */
-  time_zone?: string;
-  /** Whether the User can answer questions right now. */
-  user_available?: boolean;
+  /** RFC 5646 language tag, such as `en-US`. `null` clears it, from 1.0. */
+  locale?: string | null;
+  /** IANA time zone name, such as `America/Los_Angeles`. `null` clears it, from 1.0. */
+  time_zone?: string | null;
+  /** Whether the User can answer questions right now. `null` clears it, from 1.0. */
+  user_available?: boolean | null;
   [field: string]: unknown;
 }
 

@@ -545,11 +545,17 @@ export class PoppyUser {
    * sent back to {@link completeDirectSignIn} or {@link PoppyAgent.completeDirectSignIn}. Requests the
    * scopes already held too, unless `replaceScopes`, since the new refresh token replaces the old (4.7).
    * Only for a User who signs in themselves (spec 5.4).
+   *
+   * From 1.0 the request asks the Company for its consent page with `prompt=consent`, so a link someone
+   * forwarded can't collect tokens with no page at all (spec 4.2, 10.8). Set `sameDevice` only when the
+   * redirect can reach this agent nowhere but the device that opened `url` — where a forwarded link
+   * fails on its own, and the extra page is only friction.
    */
   startDirectSignIn(options: {
     scope: string | readonly string[];
     redirectUri?: string;
     replaceScopes?: boolean;
+    sameDevice?: boolean;
   }): Promise<{ url: string; state: string }> {
     const account = this.accountFor();
     const redirectUri = options.redirectUri ?? this.#agent.defaultRedirectUri;
@@ -562,6 +568,7 @@ export class PoppyUser {
           scope: options.scope,
           redirectUri,
           ...(options.replaceScopes === undefined ? {} : { replaceScopes: options.replaceScopes }),
+          ...(options.sameDevice === undefined ? {} : { sameDevice: options.sameDevice }),
         },
         {
           localUserId: this.#init.localUserId ?? "",

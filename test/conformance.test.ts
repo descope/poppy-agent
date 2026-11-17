@@ -238,7 +238,7 @@ describe("conformance suite", () => {
       "tasks.not-excluded": "skip",
     });
     expect(formatReport(report)).toMatch(
-      /^Personal Agent Protocol 0\.4 and 0\.3 conformance: \d+ passed, \d+ failed, \d+ skipped/,
+      /^Personal Agent Protocol 1\.0, 0\.4, 0\.3 conformance: \d+ passed, \d+ failed, \d+ skipped/,
     );
   });
 });
