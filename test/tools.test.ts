@@ -375,7 +375,13 @@ describe("poppyTools", () => {
       },
     });
     const started = await runTool(tools, "poppy_conversation_send", { text: "Exchange it" });
-    expect(started).toMatchObject({ approved_by: "user" });
+    // Sending an approval is not the Company taking it. The decline came back in the same batch, so
+    // it is this call's answer: a model reads the top-level fields, and `approved_by` alone there
+    // would have it tell the User the exchange happened.
+    expect(started).toMatchObject({
+      approval: { performed: false, declined: { operation_id: "exc_1" } },
+    });
+    expect(started["approved_by"]).toBeUndefined();
     answer = { approver: "agent" };
     const revised = await runTool(tools, "poppy_conversation_read", {
       conversation_id: String(started["conversation_id"]),

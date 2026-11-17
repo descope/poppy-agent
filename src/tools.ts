@@ -494,9 +494,15 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
         // The Company can decline in the very read that follows the approval. Mark those too, so
         // the next revision of the action goes to the User whoever approved this one (6).
         markDeclines(after);
+        // What the Company did with the approval is the answer to this call, and sending one is
+        // not the same as it being taken. `approved_by` alone would say the action happened, with
+        // the decline buried among the events, and a model reads the top-level fields.
+        const settled = latestApprovalMessage(after);
         return {
           ...result,
-          approved_by: approval.approver,
+          ...(settled?.declined === undefined
+            ? { approved_by: approval.approver }
+            : { approval: declinedForModel(settled.declined) }),
           events: [
             ...(result["events"] as unknown[]),
             ...after.map(eventForModel).filter((e) => e !== undefined),
