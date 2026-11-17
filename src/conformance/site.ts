@@ -213,9 +213,12 @@ export async function checkSite(
   const reachable: string[] = [];
   for (const [listed, url] of Object.entries(linked)) {
     if (!SUPPORTED_PROTOCOL_VERSIONS.includes(listed) || !onServingHost(url)) continue;
-    const document = await get(ctx, new URL(String(url), final));
+    const target = new URL(String(url), final);
+    const document = await get(ctx, target);
     if (
       document.status === 200 &&
+      // `fetchLinkedDocument` passes `followRedirects: false` and throws on any 3xx.
+      document.finalUrl === target.href &&
       document.json !== undefined &&
       document.json["protocol_version"] === listed &&
       document.json["supported_versions"] === undefined
@@ -296,43 +299,6 @@ export async function checkSite(
     scopes !== undefined && Object.keys(scopes).length > 0
       ? `${Object.keys(scopes).length} described`
       : "auth.scopes absent — the user reads these when approving",
-  );
-
-  // A Session an agent cannot spend anywhere.
-  //
-  // `discovery.surface` above is satisfied by a bare `web: {}`, and that is correct for a
-  // Company offering only its website — the kit says such a Company publishes `protocol_version`,
-  // `organization` and `web`, with NO `auth` and no issuer (3.1, 3.2). Advertising `auth` is the
-  // claim that signing in buys the agent something. Without `apis`, `agent` or a
-  // `browser_session_endpoint` there is nowhere to spend the Session: the spec's own note on
-  // `web` says that without that endpoint "Personal Agents browse the site as ordinary
-  // signed-out visitors" (3.1).
-  //
-  // Real agents act on this. A Personal Agent weighing whether to use Poppy at all reasons that
-  // a sign-in it cannot carry into the task is worth less than signing the User in through the
-  // browser, and takes the browser instead — so the document is not merely thin, it loses to the
-  // alternative. This is the difference between a document that passes and one that gets used.
-  const web = isObject(doc["web"]) ? doc["web"] : undefined;
-  const spends: string[] = [];
-  if (Array.isArray(doc["apis"]) && doc["apis"].length > 0) spends.push("apis");
-  if (doc["agent"] !== undefined) spends.push("agent");
-  if (typeof web?.["browser_session_endpoint"] === "string") {
-    spends.push("web.browser_session_endpoint");
-  }
-  const advertisesAuth = Object.keys(auth).length > 0;
-  add(
-    ctx,
-    "surface.session-usable",
-    "SHOULD",
-    "3.1",
-    !advertisesAuth || spends.length > 0,
-    !advertisesAuth
-      ? "no auth advertised, so no Session is promised"
-      : spends.length > 0
-        ? `a Session reaches: ${spends.join(", ")}`
-        : "auth is advertised with no apis, no agent and no web.browser_session_endpoint — " +
-          "an agent that signs the User in has nowhere to use the Session, so it signs them " +
-          "in through the browser instead and ignores this document",
   );
 
   // Plain names are reserved for the protocol, which defines the few in PROTOCOL_EXTENSIONS;
@@ -550,6 +516,59 @@ export async function checkSite(
     }
   }
 
+  // A Session an agent cannot spend anywhere.
+  //
+  // `discovery.surface` above is satisfied by a bare `web: {}`, and that is correct for a
+  // Company offering only its website — the kit says such a Company publishes `protocol_version`,
+  // `organization` and `web`, with NO `auth` and no issuer (3.1, 3.2). Having an issuer is the
+  // claim that signing in buys the agent something, and that is what the domain's PRM settles,
+  // not which keys `auth` happens to carry. Without `apis`, `agent` or a
+  // `browser_session_endpoint` there is nowhere to spend the Session: the spec's own note on
+  // `web` says that without that endpoint "Personal Agents browse the site as ordinary
+  // signed-out visitors" (3.1).
+  //
+  // Real agents act on this. A Personal Agent weighing whether to use Poppy at all reasons that
+  // a sign-in it cannot carry into the task is worth less than signing the User in through the
+  // browser, and takes the browser instead — so the document is not merely thin, it loses to the
+  // alternative. This is the difference between a document that passes and one that gets used.
+  //
+  // Each surface counts only when `parseDocument` would actually yield it: an `apis` list of
+  // types this version doesn't read leaves `Company.apis` empty, an `agent` without a `poppy`
+  // protocol yields no conversation endpoint, and a join URL that isn't https rejects the
+  // document outright.
+  const web = isObject(doc["web"]) ? doc["web"] : undefined;
+  const agent = isObject(doc["agent"]) ? doc["agent"] : undefined;
+  const spends: string[] = [];
+  if (
+    Array.isArray(doc["apis"]) &&
+    doc["apis"].some(
+      (entry) => isObject(entry) && (entry["type"] === "mcp" || entry["type"] === "openapi"),
+    )
+  )
+    spends.push("apis");
+  if (
+    Array.isArray(agent?.["protocols"]) &&
+    agent["protocols"].some((protocol) => isObject(protocol) && protocol["type"] === "poppy")
+  )
+    spends.push("agent");
+  const join = web?.["browser_session_endpoint"];
+  if (typeof join === "string" && httpsOrUndefined(join) !== undefined)
+    spends.push("web.browser_session_endpoint");
+  add(
+    ctx,
+    "surface.session-usable",
+    "SHOULD",
+    "3.1",
+    issuer === "" || spends.length > 0,
+    issuer === ""
+      ? "no issuer, so no Session is promised"
+      : spends.length > 0
+        ? `a Session reaches: ${spends.join(", ")}`
+        : "the domain names an issuer with no apis, no agent and no web.browser_session_endpoint — " +
+          "an agent that signs the User in has nowhere to use the Session, so it signs them " +
+          "in through the browser instead and ignores this document",
+  );
+
   // ---- every API the document advertises -----------------------------------------------------
   const apis = Array.isArray(doc["apis"])
     ? doc["apis"].filter((entry): entry is Record<string, unknown> => isObject(entry))
@@ -614,7 +633,22 @@ export async function checkSite(
       }
     }
 
-    const expected = String(resourceMetadataUrl(service));
+    // A `servers` URL such as `data:text/plain,x` parses but has no origin, so the well-known
+    // segment has nowhere to go and `resourceMetadataUrl` throws — outside the catch above.
+    let expected: string;
+    try {
+      expected = String(resourceMetadataUrl(service));
+    } catch {
+      add(
+        ctx,
+        `api.servers:${declared}`,
+        "MUST",
+        "7",
+        false,
+        `${service} has no origin for the well-known segment — agents drop this API`,
+      );
+      continue;
+    }
     const atSpecPath = await get(ctx, expected);
     let metadata = atSpecPath.status === 200 ? atSpecPath.json : undefined;
     if (metadata === undefined && type === "openapi" && atSpecPath.status === 404) {
@@ -671,18 +705,20 @@ export async function checkSite(
         ? metadata["resource"] === service
         : withoutTrailingSlashes(named) === withoutTrailingSlashes(service) ||
           named === resourceOrigin;
-    // Only MCP throws on a mismatch. From 0.4 `#lookup` reads a mismatching OpenAPI resource as
-    // absent and uses the default token, so it is worth reporting but it doesn't break the site.
+    // MCP always throws on a mismatch, and so does 0.3 in effect: `#lookup` only reads a
+    // mismatching resource as absent from 0.4 on, so a 0.3 agent asks for a token for the named
+    // resource and sends it here. From 0.4 the fallback makes it a finding, not a break.
+    const fatal = type === "mcp" || version === "0.3";
     add(
       ctx,
       `api.prm-resource:${declared}`,
-      type === "mcp" ? "MUST" : "SHOULD",
+      fatal ? "MUST" : "SHOULD",
       "RFC 9728 §3.3",
       matches,
       matches
         ? `resource: ${named}`
         : `resource: ${named} (expected ${service})${
-            type === "mcp" ? "" : " — agents ignore it and use the Company's default token"
+            fatal ? "" : " — agents ignore it and use the Company's default token"
           }`,
     );
 

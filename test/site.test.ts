@@ -218,7 +218,7 @@ describe("checkSite", () => {
 
     // The kit's website-only Company: `protocol_version`, `organization` and `web`, no `auth`.
     // Nothing is promised, so nothing is unspendable.
-    it("passes a website-only document that advertises no auth", async () => {
+    it("passes a website-only document, which has no issuer at all", async () => {
       const documents = conformingSite();
       const poppy = {
         ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>),
@@ -226,9 +226,27 @@ describe("checkSite", () => {
       delete poppy["apis"];
       delete poppy["auth"];
       documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, web: {} };
+      // What makes it website-only is the absent issuer, not the absent `auth` key.
+      delete documents[`${ORIGIN}/.well-known/oauth-protected-resource`];
       const result = byId(await check(documents), "surface.session-usable");
       expect(result?.ok).toBe(true);
-      expect(result?.detail).toContain("no auth");
+      expect(result?.detail).toContain("no issuer");
+    });
+
+    // `findIssuer` returns no issuer for an empty `authorization_servers`, so this Company is
+    // signed-out only however much `auth` it publishes.
+    it("passes a document with scopes but no authorization server", async () => {
+      const documents = surfaced({ web: {} });
+      documents[`${ORIGIN}/.well-known/oauth-protected-resource`] = {
+        resource: ORIGIN,
+        authorization_servers: [],
+      };
+      const poppy = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+      documents[`${ORIGIN}/.well-known/poppy.json`] = {
+        ...poppy,
+        auth: { scopes: { "orders:read": "See your orders" } },
+      };
+      expect(byId(await check(documents), "surface.session-usable")?.ok).toBe(true);
     });
 
     it("passes a site whose only surface is browser join", async () => {
@@ -242,11 +260,47 @@ describe("checkSite", () => {
 
     it("passes a site whose only surface is a Company Agent", async () => {
       const result = byId(
-        await check(surfaced({ agent: { url: `${ORIGIN}/poppy/agent` } })),
+        await check(
+          surfaced({
+            agent: { protocols: [{ type: "poppy", endpoint: `${ORIGIN}/poppy/conversations` }] },
+          }),
+        ),
         "surface.session-usable",
       );
       expect(result?.ok).toBe(true);
       expect(result?.detail).toContain("agent");
+    });
+
+    // `parseProtocols` throws without a `protocols` list and drops protocols of other types, so
+    // neither shape leaves the agent anywhere to talk.
+    it("does not count an agent the SDK would yield nothing from", async () => {
+      const bare = byId(
+        await check(surfaced({ agent: { url: `${ORIGIN}/poppy/agent` } })),
+        "surface.session-usable",
+      );
+      expect(bare?.ok).toBe(false);
+      const other = byId(
+        await check(surfaced({ agent: { protocols: [{ type: "a2a", endpoint: ORIGIN }] } })),
+        "surface.session-usable",
+      );
+      expect(other?.ok).toBe(false);
+    });
+
+    it("does not count an apis list the SDK reads nothing from", async () => {
+      const result = byId(
+        await check(surfaced({ apis: [{ type: "graphql", url: `${ORIGIN}/graphql` }] })),
+        "surface.session-usable",
+      );
+      expect(result?.ok).toBe(false);
+    });
+
+    // `optionalUrl` puts the join URL through `httpsUrl`, so this rejects the whole document.
+    it("does not count a browser join endpoint that isn't https", async () => {
+      const result = byId(
+        await check(surfaced({ web: { browser_session_endpoint: "/poppy/browser-session" } })),
+        "surface.session-usable",
+      );
+      expect(result?.ok).toBe(false);
     });
 
     it("names apis when that is where the Session goes", async () => {
@@ -456,6 +510,22 @@ describe("checkSite", () => {
     expect(byId(linked, "discovery.version-current")?.ok).toBe(true);
   });
 
+  // `fetchLinkedDocument` passes `followRedirects: false` and throws on any 3xx.
+  it("drops a linked document that is only reachable through a redirect", async () => {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      protocol_version: "9.9",
+      supported_versions: { "0.4": `${ORIGIN}/poppy-0.4.json` },
+    };
+    documents[`${ORIGIN}/elsewhere.json`] = { ...doc, protocol_version: "0.4" };
+    const results = await check(documents, {
+      [`${ORIGIN}/poppy-0.4.json`]: `${ORIGIN}/elsewhere.json`,
+    });
+    expect(byId(results, "discovery.version-supported")?.ok).toBe(false);
+  });
+
   it("drops a linked document that disagrees about its own version", async () => {
     const documents = conformingSite();
     const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
@@ -578,6 +648,31 @@ describe("checkSite", () => {
       expect(result?.ok).toBe(false);
       expect(result?.level).toBe("SHOULD");
       expect(result?.detail).toContain("default token");
+    });
+
+    // `resourceMetadataUrl` throws on a URL with no origin, outside the openApiServer catch.
+    it("reports a servers URL with no origin, instead of throwing", async () => {
+      const documents = withOpenApi();
+      documents[DESCRIPTION] = { servers: [{ url: "data:text/plain,x" }] };
+      const results = await check(documents);
+      expect(byId(results, `api.servers:${DESCRIPTION}`)?.ok).toBe(false);
+      expect(byId(results, "discovery.document")?.ok).toBe(true);
+    });
+
+    // `#lookup` only reads a mismatching resource as absent from 0.4 on. A 0.3 agent asks for a
+    // token for the resource the metadata names and sends it here, so this one really breaks.
+    it("keeps a resource mismatch at MUST on 0.3", async () => {
+      const documents = withOpenApi();
+      const poppy = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+      documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, protocol_version: "0.3" };
+      documents["https://api.shop.test/.well-known/oauth-protected-resource/v1"] = {
+        resource: "https://api.shop.test/v2",
+        authorization_servers: [ISSUER],
+      };
+      const result = byId(await check(documents), `api.prm-resource:${DESCRIPTION}`);
+      expect(result?.ok).toBe(false);
+      expect(result?.level).toBe("MUST");
+      expect(result?.detail).not.toContain("default token");
     });
 
     it("reports a description that cannot be fetched", async () => {
