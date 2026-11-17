@@ -204,6 +204,24 @@ describe("operations", () => {
     expect(parseRfc3339("2026-12-31T23:59:60Z")).toBe(Date.UTC(2026, 11, 31, 23, 59, 59));
   });
 
+  it("truncates a fractional second rather than rounding it up into the next second", () => {
+    // Number(".9999999999999999999") rounds to 1, which would carry into the next second and leave
+    // the operation unexpired for a millisecond past the time the Company wrote.
+    expect(parseRfc3339("2026-01-01T00:00:00.9999999999999999999Z")).toBe(
+      Date.UTC(2026, 0, 1, 0, 0, 0, 999),
+    );
+    expect(parseRfc3339("2026-01-01T00:00:00.5Z")).toBe(Date.UTC(2026, 0, 1, 0, 0, 0, 500));
+    expect(parseRfc3339("2026-01-01T00:00:00.25Z")).toBe(Date.UTC(2026, 0, 1, 0, 0, 0, 250));
+    expect(parseRfc3339("2026-01-01T00:00:00.0009Z")).toBe(Date.UTC(2026, 0, 1, 0, 0, 0, 0));
+    const operation = parseOperation({
+      operation_id: "exc_1",
+      revision: "r1",
+      expires_at: "2026-01-01T00:00:00.9999999999999999999Z",
+    });
+    // The millisecond after the truncated expiry is expired, not still valid.
+    expect(isOperationExpired(operation, Date.UTC(2026, 0, 1, 0, 0, 1))).toBe(true);
+  });
+
   it("reads a Poppy-Operation header, and only a well-formed one", () => {
     expect(
       parseOperationHeader('sid="ses_Hq3vT8nW2kLm9xRb", ref="exc_5Rt2.1791487200.k3Jd9Qx2mW8v"'),

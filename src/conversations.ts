@@ -1,4 +1,4 @@
-import { companySupports, type Company } from "./discovery.ts";
+import type { Company } from "./discovery.ts";
 import { PoppyError, PoppyProtocolError, parseRetryAfter } from "./errors.ts";
 import { isObject, sleep } from "./http.ts";
 import { randomId } from "./jose.ts";
@@ -356,9 +356,10 @@ function requestId(id: string | undefined, prefix = "msg_"): string {
 function messageBody(
   message: OutgoingMessage,
   defaultAuthor: "agent" | "human",
-  company: Company,
+  session: Session,
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const company = session.company;
   const id = requestId(message.id);
   if (
     message.text === undefined &&
@@ -367,15 +368,18 @@ function messageBody(
     message.approval === undefined
   )
     throw new PoppyProtocolError("a message needs text, data, context or an approval");
-  // A side sends an extension's content only to one that uses the same version (spec 8.4). The
-  // Company's own version decides which members of the approval it is sent (Operations section 2).
+  // A side sends an extension's content only to one that uses the same version (spec 8.4), which is
+  // the version the Session negotiated: the one the Company lists AND the agent declares in
+  // `Poppy-Extensions`. Taking the Company's newest instead would put version 3 members in a message
+  // whose own header says `v="2"`, or send an approval at all to a Company that was never told this
+  // agent uses the extension (Operations section 2).
   let operationsVersion: OperationsVersion | undefined;
   if (message.approval !== undefined) {
-    operationsVersion = (["3", "2"] as const).find((version) =>
-      companySupports(company, "operations", version),
-    );
+    operationsVersion = session.operationsVersion;
     if (operationsVersion === undefined)
-      throw new PoppyProtocolError(`${company.domain} doesn't list the Operations extension`);
+      throw new PoppyProtocolError(
+        `${company.domain} and this agent don't share a version of the Operations extension, so an approval can't be sent`,
+      );
   }
   const author = message.author?.type ?? defaultAuthor;
   // Only a message an AI wrote says what it had read; a person's doesn't (spec 8.4).
@@ -425,7 +429,7 @@ export class Conversations {
     message: OutgoingMessage,
     options: { wait?: number } = {},
   ): Promise<{ conversation: Conversation; update: ConversationUpdate }> {
-    return this.#create(messageBody(message, "agent", this.session.company), options.wait, false);
+    return this.#create(messageBody(message, "agent", this.session), options.wait, false);
   }
 
   /**
@@ -462,7 +466,7 @@ export class Conversations {
         : messageBody(
             { ...message, ...(options.id === undefined ? {} : { id: options.id }) },
             "human",
-            company,
+            this.session,
             links,
           );
     return this.#create(body, options.wait, true);
@@ -665,11 +669,7 @@ export class Conversation {
     options: { wait?: number } = {},
   ): Promise<ConversationUpdate> {
     // In a Direct Conversation the User writes, so messages default to `human` (spec 8.10).
-    const body = messageBody(
-      message,
-      this.direct ? "human" : "agent",
-      this.#conversations.session.company,
-    );
+    const body = messageBody(message, this.direct ? "human" : "agent", this.#conversations.session);
     const url = withQuery(`${this.#url}/messages`, {
       wait: options.wait,
       cursor: options.wait === undefined ? undefined : this.#cursor,

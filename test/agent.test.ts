@@ -4,6 +4,7 @@ import {
   MemoryStore,
   operationFromResponse,
   outcomeFromResponse,
+  parseOperation,
   PoppyAgent,
   PoppyError,
   PoppyProtocolError,
@@ -757,7 +758,11 @@ describe("draft 0.3 updates", () => {
     init: RequestInit,
   ) => Response | undefined | Promise<Response | undefined>;
 
-  async function userAt(mock: MockCompany, handler: Handler = () => undefined) {
+  async function userAt(
+    mock: MockCompany,
+    handler: Handler = () => undefined,
+    extensions: Record<string, { version: string }> = { operations: { version: "2" } },
+  ) {
     const fetchFn = (async (input: string | URL | Request, init: RequestInit = {}) =>
       (await handler(new URL(String(input)), init)) ?? mock.fetch(input, init)) as typeof fetch;
     const agent = new PoppyAgent({
@@ -765,7 +770,7 @@ describe("draft 0.3 updates", () => {
       signingKey: { privateKey: mock.agentKey.privateKey, kid: "k1" },
       fetch: fetchFn,
       redirectUri: "https://agent.example/callback",
-      extensions: { operations: { version: "2" } },
+      extensions,
     });
     return agent.user(await agent.discover("example.com"), "alice");
   }
@@ -950,6 +955,44 @@ describe("draft 0.3 updates", () => {
     await expect(conversation.openDirect(undefined)).rejects.toThrow(PoppyProtocolError);
   });
 
+  it("writes a message approval for the version the Session negotiated, not the Company's newest", async () => {
+    // 1.0 lists Operations 3 and 2. This agent declares 2, so `Poppy-Extensions` says v="2" and the
+    // approval in the message body must say the same: version 3's members would be content for a
+    // version the request never declared (spec 8.4, Operations section 2).
+    const mock = await MockCompany.create({ version: "1.0" });
+    const user = await userAt(mock, () => undefined, { operations: { version: "2" } });
+    const session = user.session();
+    expect(session.operationsVersion).toBe("2");
+    await session.conversations().start({
+      text: "Exchange it",
+      approval: userApproval(
+        parseOperation({
+          operation_id: "exc_1",
+          revision: "r1",
+          expires_at: "2099-01-01T00:00:00Z",
+        }),
+        { inputType: "tap", reference: "apr_1" },
+      ),
+    });
+    expect(mock.messageApprovals).toEqual([{ operation_id: "exc_1", revision: "r1" }]);
+  });
+
+  it("won't put an approval in a message when the agent declares no Operations extension", async () => {
+    // The Company lists the extension, but this agent never declared it, so the Company was never
+    // told this agent uses it and must not be sent its content (Operations section 2).
+    const mock = await MockCompany.create({ version: "1.0" });
+    const user = await userAt(mock, () => undefined, {});
+    const session = user.session();
+    expect(session.operationsVersion).toBeUndefined();
+    await expect(
+      session.conversations().start({
+        text: "Exchange it",
+        approval: { operationId: "exc_1", revision: "r1", approver: "user" },
+      }),
+    ).rejects.toThrow(PoppyProtocolError);
+    expect(mock.messageApprovals).toEqual([]);
+  });
+
   it("sends an approval in a message only to a Company that lists the Operations extension", async () => {
     const mock = await MockCompany.create({ poppy: (doc) => ({ ...doc, extensions: {} }) });
     const user = await userAt(mock, (url) =>
@@ -980,23 +1023,28 @@ describe("draft 0.3 updates", () => {
         },
       },
     };
-    const user = await userAt(await MockCompany.create({ version: "1.0" }), (url, init) => {
-      if (!url.href.startsWith(CONVERSATIONS)) return undefined;
-      bodies.push(JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>);
-      return Response.json(
-        {
-          id: "req_1",
-          conversation_id: "cnv_1",
-          events: [{ id: "evt_2", type: "message", created_at: "t", message: declined }],
-          cursor: "evt_2",
-          has_more: false,
-          handoff: "none",
-          responder: "agent",
-          closed: false,
-        },
-        { status: 201 },
-      );
-    });
+    const user = await userAt(
+      await MockCompany.create({ version: "1.0" }),
+      (url, init) => {
+        if (!url.href.startsWith(CONVERSATIONS)) return undefined;
+        bodies.push(JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>);
+        return Response.json(
+          {
+            id: "req_1",
+            conversation_id: "cnv_1",
+            events: [{ id: "evt_2", type: "message", created_at: "t", message: declined }],
+            cursor: "evt_2",
+            has_more: false,
+            handoff: "none",
+            responder: "agent",
+            closed: false,
+          },
+          { status: 201 },
+        );
+      },
+      // This agent declares version 3, which the 1.0 document lists, so that is what it writes.
+      { operations: { version: "3" } },
+    );
     const { conversation, update } = await user
       .session()
       .conversations()

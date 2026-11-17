@@ -141,6 +141,119 @@ describe("poppyTools", () => {
     expect(mock.approvals.filter((a) => a?.["approver"] === "agent")).toHaveLength(1);
   });
 
+  /** One Company message carrying `extensions.operations`, as a scripted conversation event. */
+  function operationsEvent(id: string, operations: Record<string, unknown>) {
+    return {
+      id,
+      type: "message",
+      created_at: "2026-10-08T19:05:00Z",
+      message: {
+        id: `msg_${id}`,
+        role: "company",
+        author: { type: "agent" },
+        text: "Here are the terms.",
+        extensions: { operations },
+      },
+    };
+  }
+
+  const terms = (revision: string) => ({
+    operation: {
+      operation_id: "exc_1",
+      revision,
+      summary: "Exchange the jacket.",
+      expires_at: "2099-01-01T00:00:00Z",
+    },
+  });
+
+  it("asks the User about new terms that answer an agent approval sent in an earlier call", async () => {
+    // Turn 1 offers terms, which the agent approves on the User's instruction. Turn 2 is the read
+    // that follows, where the Company's answer is a new revision: section 5 forbids approving that
+    // one on the same instruction, so the User has to be asked even though this is a fresh call.
+    const { mock, user, signIn } = await setup(
+      {
+        version: "1.0",
+        conversationEvents: [
+          [operationsEvent("evt_1", terms("r1"))],
+          // What the Company says when it takes the approval, so the send settles without reading on.
+          [
+            {
+              id: "evt_ack",
+              type: "message",
+              created_at: "2026-10-08T19:06:00Z",
+              message: {
+                id: "msg_ack",
+                role: "company",
+                author: { type: "agent" },
+                text: "Checking those terms.",
+              },
+            },
+          ],
+          [operationsEvent("evt_2", terms("r2"))],
+        ],
+      },
+      "3",
+    );
+    await signIn({ scope: ["orders:read"] });
+    const asked: boolean[] = [];
+    const tools = poppyTools({
+      user,
+      conversationWait: 1,
+      requestApproval: async ({ mustAskUser }) => {
+        asked.push(mustAskUser);
+        return { approver: "agent" as const };
+      },
+    });
+    const started = await runTool(tools, "poppy_conversation_send", { text: "Exchange it" });
+    expect(started).toMatchObject({ approved_by: "agent" });
+    const conversationId = String(started["conversation_id"]);
+    const next = await runTool(tools, "poppy_conversation_read", {
+      conversation_id: conversationId,
+    });
+    expect(asked).toEqual([false, true]);
+    // The second agent approval is refused, so the Company only ever saw the first.
+    expect(mock.messageApprovals).toHaveLength(1);
+    expect(next).toMatchObject({
+      approval: { performed: false, approval_required: { operation_id: "exc_1" } },
+    });
+  });
+
+  it("acts on the last approval outcome in a read, not on a decline earlier in it", async () => {
+    // One read carrying a decline of the first action and then new terms for the next. The cursor
+    // moves past both, so returning at the decline would lose the operation for good.
+    const { user, signIn } = await setup(
+      {
+        version: "1.0",
+        conversationEvents: [
+          [
+            operationsEvent("evt_1", {
+              declined: { operation_id: "exc_0", revision: "r0", reason: "Not this one." },
+            }),
+            operationsEvent("evt_2", terms("r1")),
+          ],
+          [],
+        ],
+      },
+      "3",
+    );
+    await signIn({ scope: ["orders:read"] });
+    const seen: string[] = [];
+    const result = await runTool(
+      poppyTools({
+        user,
+        conversationWait: 0,
+        requestApproval: async ({ operation }) => {
+          seen.push(operation.operationId);
+          return true;
+        },
+      }),
+      "poppy_conversation_send",
+      { text: "Exchange it" },
+    );
+    expect(seen).toEqual(["exc_1"]);
+    expect(result).toMatchObject({ approved_by: "user" });
+  });
+
   it("asks the User about terms that answered an agent approval, and refuses another agent one", async () => {
     const { user, signIn } = await setup({ version: "1.0", exchangeTermsKeepChanging: true }, "3");
     const request = { method: "POST", url: `${API}/v1/exchanges`, body: { item: "itm_1" } };

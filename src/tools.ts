@@ -210,6 +210,12 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
   const maxChars = options.maxResponseChars ?? 20_000;
   const wait = options.conversationWait ?? 20;
   const conversations = new Map<string, Conversation>();
+  /**
+   * Conversations whose last approval this agent gave on the User's instruction (Operations 5). The
+   * Company's answer to one can arrive in any later read, so this outlives the call that sent it: a
+   * new revision that answers an agent approval goes to the User, never to the same instruction.
+   */
+  const agentApproved = new Set<string>();
   // On 0.4 the Company's excluded tasks, skills and feedback endpoint come from one request in this
   // Session, so which of them exist isn't known until it answers (spec section 9). The tools that use
   // them are offered whenever the Company could publish them, and resolve the answer when they run.
@@ -413,20 +419,32 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
       result["note"] =
         "The User signed in. Send a follow-up message so the Company Agent continues with their account.";
     }
-    // A decline is the Company's last word on that approval (Operations 6): nothing more to approve.
-    const declined = events
-      .flatMap((e) => (e.type === "message" && e.message.declined ? [e.message.declined] : []))
+    // Whichever came last is where the conversation stands. A decline of one action can be followed
+    // by new terms for another, and the cursor has moved past both, so taking the decline and
+    // returning would lose the operation for good (Operations 4, 6).
+    const latest = events
+      .flatMap((e) =>
+        e.type === "message" && (e.message.declined ?? e.message.operation) !== undefined
+          ? [e.message]
+          : [],
+      )
       .at(-1);
-    if (declined !== undefined) {
-      result["approval"] = declinedForModel(declined);
+    // A decline is the Company's last word on that approval (Operations 6): nothing more to approve.
+    if (latest?.declined !== undefined) {
+      result["approval"] = declinedForModel(latest.declined);
+      // The instruction an agent approval rested on is spent: a new revision goes to the User (5).
+      agentApproved.delete(conversation.id);
       return result;
     }
-    const operation = events
-      .flatMap((e) => (e.type === "message" && e.message.operation ? [e.message.operation] : []))
-      .at(-1);
+    const operation = latest?.operation;
     if (operation !== undefined) {
-      const approval = await approve(operation);
+      // These terms may answer an agent approval sent in an earlier call, whose response arrived in
+      // this read. Section 5 forbids approving them on that same instruction.
+      const mustAskUser = agentApproved.has(conversation.id);
+      const approval = await approve(operation, mustAskUser);
       if (approval !== undefined) {
+        if (approval.approver === "agent") agentApproved.add(conversation.id);
+        else agentApproved.delete(conversation.id);
         const update = await conversation.send({
           text:
             approval.approver === "user"
@@ -447,7 +465,7 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
           closed: conversation.closed,
         };
       }
-      result["approval"] = notApproved(operation);
+      result["approval"] = notApproved(operation, mustAskUser);
     }
     return result;
   }

@@ -156,7 +156,10 @@ export function parseRfc3339(value: string): number | undefined {
   if (hour > 23 || minute > 59 || second > 60) return undefined;
   // RFC 3339 allows a leap second, which no JavaScript Date holds. It is the same instant to a second.
   if (second === 60) second = 59;
-  const milliseconds = frac === undefined ? 0 : Math.floor(Number(frac) * 1000);
+  // Truncate the fraction to milliseconds on its digits, not through a float: Number(".9999999999")
+  // rounds to 1, which would roll the expiry into the next second and leave the operation unexpired
+  // for a millisecond past the time the Company wrote.
+  const milliseconds = frac === undefined ? 0 : Number(frac.slice(1, 4).padEnd(3, "0"));
   const date = new Date(0);
   // setUTCFullYear, not Date.UTC: Date.UTC maps years 0-99 into the 1900s.
   date.setUTCFullYear(year, month - 1, day);

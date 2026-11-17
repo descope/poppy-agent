@@ -65,7 +65,11 @@ const agent = new PoppyAgent({
     kid: context.signing_key.kid,
   },
   redirectUri: context.redirect_uri,
-  extensions: { operations: { version: "3" } },
+  // Version 2, not 3, because that is what descope/poppy-conformance's Company lists. The extension
+  // is used only when both sides name the same version (Operations extension section 2), so declaring
+  // 3 here would leave `session.operationsVersion` undefined and the approval steps with nothing to
+  // send. Bump this to "3" once the suite's Company lists version 3.
+  extensions: { operations: { version: "2" } },
   // Web Bot Auth, so bot defenses can recognize the operator (spec 5.3). The key is made for this
   // run: a real agent publishes its public key in a key directory and keeps the private one.
   operatorSignature: await (async () => {

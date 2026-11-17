@@ -60,6 +60,11 @@ export interface MockOptions {
   tasksRateLimited?: boolean;
   /** A website page refuses the Session header once with invalid_session (spec 5.2). */
   pageRejectsSession?: boolean;
+  /**
+   * Events the conversation endpoint answers with, one batch per POST or events read, in order. The
+   * array is consumed, so a test scripts exactly the turns it wants and the rest answer empty.
+   */
+  conversationEvents?: Record<string, unknown>[][];
   /** Decline an agent approval rather than performing the action (Operations extension section 6). */
   declineAgentApprovals?: boolean;
   /**
@@ -152,6 +157,8 @@ export class MockCompany {
   readonly approvals: (Record<string, string | number> | undefined)[] = [];
   /** Whether an approval of the website's operation is recorded and waiting (Operations section 6). */
   webApprovalRecorded = false;
+  /** Every `extensions.operations.approval` the agent has sent in a message (Operations section 6). */
+  readonly messageApprovals: unknown[] = [];
   device: "pending" | "slow_down" | "approved" | "denied" = "pending";
   deviceScope: string[] = [];
   /** Fail the next resource request with invalid_token. */
@@ -479,7 +486,7 @@ export class MockCompany {
       default:
         if (here.startsWith(CONVERSATIONS))
           return this.#resource(url, method, headers, undefined, undefined, () =>
-            this.#conversation(url, method),
+            this.#conversation(url, method, body),
           );
         return json(404, { error: "not_found" });
     }
@@ -489,7 +496,19 @@ export class MockCompany {
    * Just enough of a conversation endpoint to see what the agent sends (spec 8). 0.3 answers with
    * `status` and `responder`; 0.4 answers a POST with only the conversation id (spec 8.3, 8.7).
    */
-  #conversation(url: URL, method: string): Response {
+  #conversation(url: URL, method: string, body: string): Response {
+    // Keep the approval of each message the agent sends, so a test can see what it wrote (spec 8.4).
+    if (method === "POST" && body !== "") {
+      const sent: unknown = JSON.parse(body);
+      const message =
+        typeof sent === "object" && sent !== null
+          ? ((sent as Record<string, unknown>)["message"] as Record<string, unknown> | undefined)
+          : undefined;
+      const extensions = message?.["extensions"] as Record<string, unknown> | undefined;
+      const operations = extensions?.["operations"] as Record<string, unknown> | undefined;
+      if (operations?.["approval"] !== undefined)
+        this.messageApprovals.push(operations["approval"]);
+    }
     const rest = url.pathname
       .slice(new URL(CONVERSATIONS).pathname.length)
       .split("/")
@@ -503,17 +522,20 @@ export class MockCompany {
     if (method !== "POST" && !(rest[1] === "events" && method === "GET"))
       return json(404, { error: "not_found" });
     const id = rest[0] ?? `cnv_${++this.#counter}`;
+    // Each POST and each events read takes the next batch the test scripted, then nothing more.
+    const events = this.options.conversationEvents?.shift() ?? [];
+    const cursor = events.length === 0 ? null : (events.at(-1) as { id: string }).id;
     if (rest[1] === "events")
-      return json(200, {
-        conversation_id: id,
-        events: [],
-        cursor: null,
-        has_more: false,
-        ...state,
-      });
+      return json(200, { conversation_id: id, events, cursor, has_more: false, ...state });
+    // Only a scripted Company answers a POST with events: without a script, 0.4 answers with the
+    // conversation id alone, as it did before (spec 8.3).
+    const scripted =
+      this.options.conversationEvents === undefined
+        ? {}
+        : { events, cursor, has_more: false, ...state };
     return json(
       rest.length === 0 ? 201 : 202,
-      isV4 ? { conversation_id: id } : { conversation_id: id, ...state },
+      isV4 ? { conversation_id: id, ...scripted } : { conversation_id: id, ...state, ...scripted },
     );
   }
 
