@@ -4,6 +4,7 @@ export { PoppyAgent, PoppyUser } from "./agent.ts";
 export type { PoppyAgentOptions, UserOptions } from "./agent.ts";
 export { authChallenge, parseChallenges, scopesNeeded } from "./challenge.ts";
 export type { AuthChallenge } from "./challenge.ts";
+export { companyLabel, NAME_LIMIT, plainText } from "./content.ts";
 export { Conversation, Conversations, parseEvent } from "./conversations.ts";
 export type {
   Author,

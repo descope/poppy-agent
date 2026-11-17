@@ -28,7 +28,7 @@ sequenceDiagram
 A business identifies your agent from the profile URL in `UCP-Agent`, and verifies your signatures with the keys in it. Build it with `ucpPlatformProfile()` and serve it over HTTPS with `Cache-Control: public, max-age=60` or longer:
 
 ```typescript
-import { ucpPlatformProfile } from "@descope/poppy";
+import { ucpPlatformProfile } from "@descope/poppy-agent";
 
 const profile = ucpPlatformProfile({
   capabilities: {
@@ -47,7 +47,7 @@ A platform profile describes your agent, never a User. Keep it the same for ever
 ## Discover and negotiate
 
 ```typescript
-import { discoverCompanyUcp, negotiateUcp } from "@descope/poppy";
+import { discoverCompanyUcp, negotiateUcp } from "@descope/poppy-agent";
 
 const company = await agent.discover("example.com");
 // company.ucp is set when poppy.json lists the UCP extension.
@@ -71,7 +71,7 @@ negotiation.restEndpoint; // the shopping service's REST endpoint
 ## Make requests
 
 ```typescript
-import { UcpClient, ucpHandoffUrl } from "@descope/poppy";
+import { UcpClient, ucpHandoffUrl } from "@descope/poppy-agent";
 
 const ucp = new UcpClient({
   negotiation,
@@ -103,7 +103,7 @@ if (handoff !== undefined) showUser(handoff); // the business needs the buyer
 Through the extension, UCP's identity linking is Poppy's Direct Sign-In at the Company's issuer. You sign the User in once, and the same refresh token serves UCP, the Company's other APIs and its conversations:
 
 ```typescript
-import { ucpIdentityScopes } from "@descope/poppy";
+import { ucpIdentityScopes } from "@descope/poppy-agent";
 
 await user.startDirectSignIn({ scope: ucpIdentityScopes(negotiation) });
 ```
@@ -117,7 +117,7 @@ UCP's challenges work like any API's. A 401 `identity_required` means the operat
 A business can offer the same operations as MCP tools. UCP carries its metadata in the tool's arguments, not MCP's `_meta`:
 
 ```typescript
-import { ucpMcpArguments } from "@descope/poppy";
+import { ucpMcpArguments } from "@descope/poppy-agent";
 
 await mcpClient.callTool({
   name: "complete_checkout",
