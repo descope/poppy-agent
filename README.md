@@ -37,7 +37,7 @@ This repository contains the TypeScript SDK for the **Personal Agent** side of t
 - **Task coverage**: a Company's excluded tasks, skills and feedback endpoint, from `poppy.json` on 0.3 or per Session from 0.4, behind one API
 - The **Operations**, **Links** and **Disclosures** extensions
 - **UCP**: through Poppy's UCP extension, discover a Company's Universal Commerce Protocol profile, negotiate, and check out with signed requests in the User's Poppy Session
-- **A conformance suite** that checks a Personal Agent in any language against the spec, which this SDK passes in full
+- **Conformance**: this SDK passes [the conformance suite](https://github.com/descope/poppy-conformance) in full, on every check
 - **Tools for models**: hand a Company to the Vercel AI SDK, Anthropic, OpenAI or any MCP client as tools, with secrets kept out of the model
 
 It has zero runtime dependencies, uses `fetch` and WebCrypto only, and runs on Node.js 22 or later.
@@ -148,14 +148,13 @@ For a runnable script, see [`examples/quickstart.ts`](examples/quickstart.ts).
 | Extensions       | Operations (`operationFromResponse()`, `approvalFor()`, `renderSummary()`), Links and Disclosures in messages, Mediated Sign-In, and UCP.                                                                                                      |
 | Tools for models | `poppyTools()`, with `toAiSdkTools()`, `toAnthropicTools()`, `toOpenAITools()` and `toMcpTools()`.                                                                                                                                             |
 | UCP              | `discoverCompanyUcp()`, `negotiateUcp()` and `UcpClient` for checkout, carts, catalog and orders, with signed requests in the User's Session.                                                                                                  |
-| Conformance      | `@descope/poppy/conformance` checks any Personal Agent against the spec's rules for agents.                                                                                                                                                    |
 
 ## Documentation
 
 - [Build your first Personal Agent](docs/get-started/first-agent.md): a step-by-step tutorial
 - [Tools for models](docs/tools.md): give a model a Company's APIs and Company Agent as tools, with the AI SDK, Anthropic, OpenAI or MCP
 - [UCP](docs/ucp.md): commerce with the Universal Commerce Protocol, next to Poppy
-- [Conformance](packages/conformance/README.md): test any Personal Agent, in any language, against the spec's rules, with a CLI, baselines and a GitHub Action
+- [Conformance](https://github.com/descope/poppy-conformance): test any Personal Agent, in any language, against the spec's rules, with a CLI, baselines and a GitHub Action — and check a Company's discovery chain
 - [How it works](docs/how-it-works.md): discovery, Sessions, sign-in, requests, browser join, conversations and operations, with sequence diagrams
 - [Security and storage](docs/security.md): what the SDK protects, what it stores, and what you must protect
 - [Troubleshooting](docs/troubleshooting.md): common errors and their fixes

@@ -2,7 +2,11 @@
  * This SDK's "everything agent" for the conformance suite: it reads the scenario from the environment
  * and carries out each step with the SDK's public API.
  *
- *   node packages/conformance/src/cli.ts agent --command "node examples/conformance-agent.ts"
+ *   npx @descope/poppy-conformance agent --command "node examples/conformance-agent.ts"
+ *
+ * The suite itself lives in https://github.com/descope/poppy-conformance. This agent stays here so
+ * the SDK keeps a subject for that command, and so the public API an everything-agent needs keeps
+ * compiling; CI will run the command again once @descope/poppy-conformance is on npm.
  *
  * Agents in other languages follow the same contract: read POPPY_CONFORMANCE_CONTEXT, do each step in
  * order, print one JSON line per failed step, and keep going.
