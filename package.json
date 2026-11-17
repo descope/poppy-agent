@@ -33,23 +33,18 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./conformance": {
-      "types": "./dist/conformance/index.d.ts",
-      "default": "./dist/conformance/index.js"
-    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && pnpm --filter @descope/poppy-conformance run build",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --deny-warnings",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "test": "vitest run",
-    "conformance": "node packages/conformance/src/cli.ts agent --command \"node examples/conformance-agent.ts\""
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
