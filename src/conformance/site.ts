@@ -364,7 +364,11 @@ export async function checkSite(
   // With `auth.issuer` declared it is a real failure, and the same function says so by throwing
   // "auth.issuer is set, but the domain names no issuer": the document names an issuer the
   // domain refuses to confirm, which is the claim 3.2 exists to stop.
-  const noIssuerIsFine = domainPrm.status === 404 && declaredIssuer === "";
+  //
+  // `auth["issuer"] === undefined`, not `declaredIssuer === ""`: `parseDocument` puts any value
+  // that is present through `string()`, so `auth.issuer: ""` or a non-string is a document it
+  // rejects outright, not a Company that declared no issuer.
+  const noIssuerIsFine = domainPrm.status === 404 && auth["issuer"] === undefined;
   const servedDomainPrm = add(
     ctx,
     "prm.domain",
@@ -375,7 +379,7 @@ export async function checkSite(
       ? `no metadata and no auth.issuer — the Company offers no sign-in, so agents use it signed out`
       : `${outcome(`${resourceOrigin}${PRM}`, domainPrm)}${
           domainPrm.status === 404
-            ? ` — but auth.issuer names ${declaredIssuer}, which the domain does not confirm`
+            ? ` — but auth.issuer is ${JSON.stringify(auth["issuer"])}, which the domain does not confirm`
             : ""
         }`,
   );
@@ -538,6 +542,35 @@ export async function checkSite(
     }
   }
 
+  // A `signed_in` conversation needs somewhere to sign in.
+  //
+  // `discover()` throws "a signed_in conversation protocol needs an issuer" when it resolves no
+  // issuer and any `poppy` protocol asks for `signed_in` access (`discovery.ts`), so such a
+  // document is not a Company an agent can reach at all. Until `prm.domain` stopped failing every
+  // 404 it caught this by accident; nothing else does, because `surface.session-usable` below
+  // passes on an absent issuer too. Without this, a site no agent can discover reports no MUST
+  // failure of any kind.
+  const agent = isObject(doc["agent"]) ? doc["agent"] : undefined;
+  const signedInConversation =
+    Array.isArray(agent?.["protocols"]) &&
+    agent["protocols"].some(
+      (protocol) =>
+        isObject(protocol) && protocol["type"] === "poppy" && protocol["access"] === "signed_in",
+    );
+  if (signedInConversation) {
+    add(
+      ctx,
+      "agent.signed-in-needs-issuer",
+      "MUST",
+      "3.2",
+      issuer !== "",
+      issuer !== ""
+        ? `signed_in conversation, and the domain names ${issuer}`
+        : "a poppy protocol asks for signed_in access, but the domain names no issuer — " +
+            "discover() refuses this document outright",
+    );
+  }
+
   // A Session an agent cannot spend anywhere.
   //
   // `discovery.surface` above is satisfied by a bare `web: {}`, and that is correct for a
@@ -566,7 +599,6 @@ export async function checkSite(
   // extension counts: for a SHOULD, a warning missed costs less than one raised against a
   // Company that is doing nothing wrong.
   const web = isObject(doc["web"]) ? doc["web"] : undefined;
-  const agent = isObject(doc["agent"]) ? doc["agent"] : undefined;
   const spends: string[] = [];
   if (
     Array.isArray(doc["apis"]) &&

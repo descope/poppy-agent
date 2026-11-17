@@ -151,6 +151,63 @@ describe("checkSite", () => {
     expect(result?.detail).toContain(ISSUER);
   });
 
+  // `auth.issuer: ""` is not "no issuer declared" — `parseDocument` puts any present value
+  // through `string()`, so this is a document the SDK rejects, not a website-only Company.
+  it("does not read an empty auth.issuer as no issuer at all", async () => {
+    const documents = conformingSite();
+    const poppy = { ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>) };
+    documents[`${ORIGIN}/.well-known/poppy.json`] = { ...poppy, auth: { issuer: "" } };
+    delete documents[`${ORIGIN}/.well-known/oauth-protected-resource`];
+    expect(byId(await check(documents), "prm.domain")?.ok).toBe(false);
+  });
+
+  describe("a signed_in conversation", () => {
+    function withConversation(access: string, keepPrm: boolean): Record<string, unknown> {
+      const documents = conformingSite();
+      const poppy = {
+        ...(documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>),
+      };
+      delete poppy["auth"];
+      // Agent-only: the fixture's MCP API names an issuer, and with none resolved it would fail
+      // `api.mcp-issuer` — a real failure, but not the one these cases are about.
+      delete poppy["apis"];
+      documents[`${ORIGIN}/.well-known/poppy.json`] = {
+        ...poppy,
+        agent: { protocols: [{ type: "poppy", endpoint: `${ORIGIN}/poppy/agent`, access }] },
+      };
+      if (!keepPrm) delete documents[`${ORIGIN}/.well-known/oauth-protected-resource`];
+      return documents;
+    }
+
+    // The regression `prm.domain` used to hide: `discover()` throws on this document, so a report
+    // with no MUST failure in it would be telling a Company that agents can reach a site they
+    // refuse outright.
+    it("fails without an issuer, and does not leave the report clean", async () => {
+      const results = await check(withConversation("signed_in", false));
+      const result = byId(results, "agent.signed-in-needs-issuer");
+      expect(result?.ok).toBe(false);
+      expect(result?.level).toBe("MUST");
+      expect(results.filter((r) => !r.ok && r.level === "MUST").map((r) => r.id)).toContain(
+        "agent.signed-in-needs-issuer",
+      );
+    });
+
+    it("passes when the domain names an issuer", async () => {
+      const result = byId(
+        await check(withConversation("signed_in", true)),
+        "agent.signed-in-needs-issuer",
+      );
+      expect(result?.ok).toBe(true);
+    });
+
+    // `session` access, the default, needs no issuer — the rule must not fire for it.
+    it("is not checked for a session-access conversation", async () => {
+      const results = await check(withConversation("session", false));
+      expect(byId(results, "agent.signed-in-needs-issuer")).toBeUndefined();
+      expect(results.filter((r) => !r.ok && r.level === "MUST")).toEqual([]);
+    });
+  });
+
   it("catches a domain PRM whose resource carries a path", async () => {
     const documents = conformingSite();
     documents[`${ORIGIN}/.well-known/oauth-protected-resource`] = {
