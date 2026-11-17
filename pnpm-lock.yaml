@@ -5,10 +5,6 @@ importers:
 
   .:
     configDependencies: {}
-    packageManagerDependencies:
-      pnpm:
-        specifier: 12.16.0
-        version: 12.16.0
 
 packages:
 
