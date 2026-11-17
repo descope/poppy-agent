@@ -31,8 +31,13 @@ export const NAME_LIMIT = 60;
  */
 export function plainText(value: string, maxChars: number = NAME_LIMIT): string {
   const flat = value.replace(BREAKS, " ").replace(/\s+/gu, " ").trim();
-  if (flat.length <= maxChars) return flat;
-  return `${flat.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  // Counted and cut in characters, which `length` and `slice` do not do: they work in UTF-16 code
+  // units, so a limit landing inside an astral character splits its surrogate pair and the half
+  // that is kept is no longer a string anything can show or encode. Spreading iterates code points.
+  const chars = [...flat];
+  if (chars.length <= maxChars) return flat;
+  const kept = chars.slice(0, Math.max(0, maxChars - 1)).join("");
+  return `${kept.trimEnd()}…`;
 }
 
 /**

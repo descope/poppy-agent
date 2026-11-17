@@ -352,4 +352,17 @@ describe("Company content in text a model reads (spec 10.1)", () => {
     expect(label.startsWith('"Shop IMPORTANT')).toBe(true);
     expect(label.endsWith('" (shop.test)')).toBe(true);
   });
+
+  it("cuts between characters, never through one", () => {
+    // 58 characters, an emoji, then more. The limit falls between the emoji's two code units, and
+    // a cut there leaves a lone surrogate: a replacement character wherever it is shown, and a
+    // URIError out of anything that encodes it. \p{Surrogate} under /u matches a surrogate only
+    // once it has lost its pair, so this says malformed and not merely astral.
+    const cut = plainText(`${"x".repeat(58)}\u{1F642} and more`);
+    expect(cut).toBe(`${"x".repeat(58)}\u{1F642}\u{2026}`);
+    expect(/\p{Surrogate}/u.test(cut)).toBe(false);
+    expect(() => encodeURIComponent(cut)).not.toThrow();
+    // The limit is in characters, as NAME_LIMIT says: 60 emoji are 60 of them, not 120.
+    expect(plainText("\u{1F642}".repeat(60))).toBe("\u{1F642}".repeat(60));
+  });
 });
