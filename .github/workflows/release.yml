@@ -8,6 +8,37 @@ permissions:
   contents: read
 
 jobs:
+  # Every push to main publishes a throwaway version under the `next` tag, so a fix can be
+  # installed before it is released. Versions look like 0.0.0-next-1a2b3c4d-20261117, which
+  # sorts below any real release, so `npm install @descope/poppy` never picks one up.
+  #
+  # This job fails until the package exists on npm: trusted publishing can configure a
+  # publisher only for a package that is already there, so the first publish has to be done
+  # by hand. Once it has been, this and the release job both work with no token anywhere.
+  publish-next:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - name: Name this build after the commit and the day
+        run: echo "NEW_VERSION=0.0.0-next-$(echo ${{ github.sha }} | cut -c1-8)-$(date +'%Y%m%d')" >> "$GITHUB_ENV"
+      - run: npm version "${NEW_VERSION}" --no-git-tag-version
+      # --ignore-scripts, then build explicitly: a dependency's install script would otherwise
+      # run in a job that holds a publishing identity.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run build
+      - run: npm publish --access=public --tag next --provenance
+
   release-please:
     runs-on: ubuntu-latest
     permissions:
@@ -47,5 +78,7 @@ jobs:
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm run build
-      # npm CLI, not pnpm: trusted publishing needs npm >= 11.5.1 (Node 24 ships it).
-      - run: npm publish
+      # npm CLI, not pnpm: trusted publishing needs npm >= 11.5.1, which the Node above ships.
+      # --provenance records a signed attestation of which workflow and commit built this
+      # tarball, which is most of the point of publishing from CI rather than a laptop.
+      - run: npm publish --access=public --provenance
