@@ -309,6 +309,19 @@ export class ConformanceCompany {
     return this.version === "0.3" ? "0.4" : "0.3";
   }
 
+  /**
+   * The version this scenario actually holds the agent to, which is what a report may claim it
+   * checked. Usually {@link version} — but when the link to that version's document is one the agent
+   * MUST refuse, an offsite link or one whose document declares another version (spec 3.4), the only
+   * document left is `poppy.json`, which carries the other version. Reporting `version` for those
+   * would name a version the agent was never tested at.
+   */
+  get checkedVersion(): "0.3" | "0.4" {
+    const linkUnusable =
+      this.scenario.linkedVersionOffsite === true || this.scenario.linkedVersionMismatch === true;
+    return linkUnusable ? this.#otherVersion : this.version;
+  }
+
   /** Whether the agent should end up on `version` rather than on the other document's version. */
   get #servesTwoVersions(): boolean {
     return (

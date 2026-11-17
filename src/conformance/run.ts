@@ -72,7 +72,11 @@ export interface ScenarioCheck {
 export interface ScenarioResult {
   scenario: string;
   description: string;
-  /** The protocol version this scenario's Company served, and so the one it held the agent to. */
+  /**
+   * The protocol version this scenario held the agent to — the document it must end up working from,
+   * which is not always the one the Company prefers: a scenario whose link to the newer document is
+   * one the agent MUST refuse checks it at the older version (spec 3.4).
+   */
   protocolVersion: string;
   checks: ScenarioCheck[];
   /** Steps the agent couldn't carry out, with why. Expected in scenarios it should refuse. */
@@ -119,7 +123,7 @@ export function scenarioResult(
   return {
     scenario: definition.name,
     description: definition.description,
-    protocolVersion: company.version,
+    protocolVersion: company.checkedVersion,
     checks,
     stepErrors,
   };

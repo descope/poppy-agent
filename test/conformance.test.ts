@@ -3,10 +3,12 @@ import {
   type AgentFactory,
   formatReport,
   runConformance,
+  scenarioResult,
   type ScenarioResult,
   summarize,
 } from "../src/conformance/index.ts";
 import { BROWSER_SESSION } from "../src/conformance/company.ts";
+import { ConformanceCompany, type Scenario } from "../src/conformance/index.ts";
 import {
   approvalFor,
   clientMetadata,
@@ -279,5 +281,47 @@ describe("what the report claims it checked", () => {
     expect(SUPPORTED_PROTOCOL_VERSIONS).toContain("1.0");
     expect(formatReport(report)).toContain("Personal Agent Protocol 0.4 conformance");
     expect(formatReport(report)).not.toContain("1.0");
+  });
+});
+
+describe("the version a scenario holds the agent to", () => {
+  const company = (scenario: Scenario) => new ConformanceCompany(scenario).checkedVersion;
+
+  it("is the preferred version when the agent can reach that document", () => {
+    expect(company({ version: "0.4" })).toBe("0.4");
+    // poppy.json is the 0.3 document and the 0.4 link is good, so the agent follows it.
+    expect(company({ version: "0.4", linkPreferredVersion: true })).toBe("0.4");
+  });
+
+  it("is the version left over when the agent must refuse the link", () => {
+    // An offsite link, and a linked document declaring another version, are both ones the agent
+    // MUST NOT use (spec 3.4) — so it works from poppy.json, which is the 0.3 document.
+    expect(company({ version: "0.4", linkedVersionOffsite: true })).toBe("0.3");
+    expect(company({ version: "0.4", linkedVersionMismatch: true })).toBe("0.3");
+  });
+
+  it("records the held version on the result, not the Company's preference", () => {
+    // Pins the wiring, not just the getter: scenarioResult must read `checkedVersion`.
+    const scenario: Scenario = { version: "0.4", linkedVersionOffsite: true };
+    const result = scenarioResult(
+      { name: "linked-offsite", description: "", suite: "versions", company: scenario, steps: [] },
+      new ConformanceCompany(scenario),
+      [],
+    );
+    expect(result.protocolVersion).toBe("0.3");
+  });
+
+  it("keeps those scenarios from making a report claim 0.4", () => {
+    const results = (["0.4", "0.3"] as const).map((v) => ({
+      scenario: v,
+      description: "",
+      protocolVersion: new ConformanceCompany({
+        version: "0.4",
+        linkedVersionOffsite: v === "0.3",
+      }).checkedVersion,
+      stepErrors: [],
+      checks: [{ id: "session.header", status: "pass" as const, details: [] }],
+    }));
+    expect(summarize([results[1]!]).protocolVersions).toEqual(["0.3"]);
   });
 });
