@@ -34,7 +34,7 @@ export interface PoppyAgentOptions {
   /** The default `redirect_uri` for Direct Sign-In, one of your `redirect_uris` (spec 4.2). */
   redirectUri?: string;
   /**
-   * The extensions you support, by name, such as `{ operations: { version: "2" } }` (spec 3.3).
+   * The extensions you support, by name, such as `{ operations: { version: "3" } }` (spec 3.3).
    *
    * On 0.3 you also list them in your client metadata document, so keep the two the same. From 0.4 the
    * client metadata has no `extensions`: each request declares the ones you use with that Company in

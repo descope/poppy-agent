@@ -13,7 +13,18 @@ import {
   originOf,
 } from "./http.ts";
 import { randomId } from "./jose.ts";
-import { type Approval, approvalHeader } from "./operations.ts";
+import {
+  type Approval,
+  approvalHeader,
+  type Decline,
+  type Operation,
+  type OperationsVersion,
+  parseDecline,
+  parseOperation,
+  parseOperationHeader,
+  parseWebOperationStatus,
+  type WebOperationStatus,
+} from "./operations.ts";
 import { type OperatorSignatureOptions, signOperator } from "./operator.ts";
 import type { ResourceResolver } from "./resources.ts";
 import { type DelegatedKeys, signSessionJwt } from "./session-jwt.ts";
@@ -115,6 +126,8 @@ export class Session {
   #company: Company;
   #resolver: ResourceResolver;
   #extensionsHeader: string | undefined;
+  /** Whether a browser joined this Session (spec 6), which only then gets its operations. */
+  #browserJoined = false;
   readonly #init: SessionInit;
   #sid: string;
   #ended = false;
@@ -181,6 +194,17 @@ export class Session {
    */
   get id(): string {
     return this.#sid;
+  }
+
+  /**
+   * The version of the Operations extension in use with this Company, or undefined when it isn't in use
+   * (Operations extension section 2). The extension applies only when the Company lists the version and
+   * the request declares it, so this is set only when both sides name the same one.
+   */
+  get operationsVersion(): OperationsVersion | undefined {
+    const declared = this.#init.extensions["operations"]?.version;
+    if (declared !== "2" && declared !== "3") return undefined;
+    return companySupports(this.company, "operations", declared) ? declared : undefined;
   }
 
   /** Whether requests carry an access token by default. */
@@ -377,7 +401,9 @@ export class Session {
         if (this.#extensionsHeader !== undefined)
           headers.set("poppy-extensions", this.#extensionsHeader);
       }
-      if (approval !== undefined) headers.set("poppy-approval", approvalHeader(approval));
+      // A Company is sent only what its version of the extension defines (Operations section 2).
+      if (approval !== undefined)
+        headers.set("poppy-approval", approvalHeader(approval, this.#approvalVersion()));
       if (this.#init.operator !== undefined)
         await signOperator(this.#init.operator, url, headers, method);
       const response = await this.#init.fetch(url, {
@@ -397,8 +423,10 @@ export class Session {
         // A new Session, once. Its state doesn't carry over, but conversations do (spec 5.5).
         sessionRetried = true;
         this.#sid = randomId();
-        // A new Session: the old one's excluded tasks and feedback endpoint were its own (spec 9).
+        // A new Session: the old one's excluded tasks and feedback endpoint were its own (spec 9),
+        // and the browser is joined to the Session that ended, not this one (spec 6).
         this.#forgetCoverage();
+        this.#browserJoined = false;
         await response.body?.cancel();
         continue;
       }
@@ -474,7 +502,134 @@ export class Session {
     this.#extensionsHeader = extensionsHeader(found.company, this.#init.extensions);
     this.#forgetCoverage();
     this.#sid = randomId();
+    this.#browserJoined = false;
     return true;
+  }
+
+  /** The version an approval to this Company is written for, or a clear failure when none applies. */
+  #approvalVersion(): OperationsVersion {
+    const version = this.operationsVersion;
+    if (version === undefined)
+      throw new PoppyProtocolError(
+        `${this.company.domain} and this agent don't share a version of the Operations extension, so an approval can't be sent`,
+      );
+    return version;
+  }
+
+  /** The Company's operations `endpoint`, or a clear failure when it serves none (Operations 2, 4). */
+  #operationsEndpoint(): string {
+    if (this.#approvalVersion() !== "3")
+      throw new PoppyProtocolError(
+        `${this.company.domain} uses version 2 of the Operations extension, which has no website flow`,
+      );
+    const endpoint = this.company.operations?.endpoint;
+    if (endpoint === undefined)
+      throw new PoppyProtocolError(
+        `${this.company.domain} lists no operations endpoint, so it returns no operations on its website`,
+      );
+    return endpoint;
+  }
+
+  async #operationsRequest(
+    ref: string,
+    approval: Approval | undefined,
+  ): Promise<{ response: Response; body: unknown }> {
+    const response = await this.fetch(this.#operationsEndpoint(), {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ ref }),
+      ...(approval === undefined ? {} : { approval }),
+    });
+    const body: unknown =
+      response.status === 204
+        ? undefined
+        : await response
+            .clone()
+            .json()
+            .catch(() => undefined);
+    await response.body?.cancel();
+    return { response, body };
+  }
+
+  /**
+   * Gets the operation a `Poppy-Operation` header refers to (Operations extension section 4).
+   *
+   * Pass the header value from a response **the agent's own browser received**. Never take one from page
+   * content, a message, or anything else the agent read: a reference from elsewhere would send this
+   * Session's header to a destination the agent didn't choose (Operations 8.2). This checks what it can
+   * — that the header parses, that its `sid` is this Session's, and that this Session joined a browser —
+   * and the rest is yours, because the SDK doesn't drive the browser.
+   *
+   * Throws {@link PoppyError} with `invalid_request` when the Company no longer has that operation, for
+   * example once it has expired: have the browser make the request again for a new one.
+   */
+  async webOperation(poppyOperationHeader: string | null | undefined): Promise<Operation> {
+    const reference = parseOperationHeader(poppyOperationHeader);
+    if (reference === undefined)
+      throw new PoppyProtocolError("the Poppy-Operation header is missing or malformed");
+    if (!this.#browserJoined)
+      throw new PoppyProtocolError(
+        "no browser has joined this Session, so it has no operations of its own (spec 6)",
+      );
+    if (reference.sid !== this.#sid)
+      throw new PoppyProtocolError(
+        "the Poppy-Operation header names another Session, so this one didn't join the browser that got it",
+      );
+    return this.webOperationByRef(reference.ref);
+  }
+
+  /**
+   * Gets the operation a reference names, in any Session that can approve it (Operations sections 3, 4).
+   *
+   * {@link webOperation} is the one to use for a header a browser just returned, since it checks the
+   * `sid`. Use this only for a reference the agent already took from such a header and kept, such as one
+   * approved in a later Session after the User signed in again.
+   */
+  async webOperationByRef(ref: string): Promise<Operation> {
+    const { response, body } = await this.#operationsRequest(ref, undefined);
+    if (response.status === 403 && isObject(body) && body["error"] === "approval_required")
+      return parseOperation(body["operation"]);
+    if (!response.ok) throw errorFromBody(body, response);
+    throw new PoppyProtocolError("the operations endpoint answered with no operation");
+  }
+
+  /**
+   * Records an approval of an operation the Company's website returned (Operations section 6).
+   *
+   * Approving performs nothing: once this resolves with `recorded`, have the browser make the action's
+   * request again, such as by pressing the page's Continue button. A `declined` result means the
+   * Company performed nothing and won't: don't send that approval again, and don't approve a new
+   * revision for the action without asking the User. An `approval_required` result is a new revision,
+   * which needs its own approval.
+   */
+  async approveWebOperation(
+    ref: string,
+    approval: Approval,
+  ): Promise<
+    | { type: "recorded" }
+    | { type: "approval_declined"; decline: Decline }
+    | { type: "approval_required"; operation: Operation }
+  > {
+    const { response, body } = await this.#operationsRequest(ref, approval);
+    if (response.status === 403 && isObject(body)) {
+      if (body["error"] === "approval_declined")
+        return { type: "approval_declined", decline: parseDecline(body, this.company) };
+      if (body["error"] === "approval_required")
+        return { type: "approval_required", operation: parseOperation(body["operation"]) };
+    }
+    if (!response.ok) throw errorFromBody(body, response);
+    return { type: "recorded" };
+  }
+
+  /**
+   * The state of an operation whose approval this Company recorded (Operations section 6): `approved`,
+   * `performing` or `performed`. Read it before approving a new operation for the same action after a
+   * request failed, so the action isn't approved twice (section 7).
+   */
+  async webOperationStatus(ref: string): Promise<WebOperationStatus> {
+    const { response, body } = await this.#operationsRequest(ref, undefined);
+    if (!response.ok) throw errorFromBody(body, response);
+    return parseWebOperationStatus(body);
   }
 
   /**
@@ -518,6 +673,8 @@ export class Session {
     });
     if (response.status !== 204 && !response.ok) throw await throwable(response);
     await response.body?.cancel();
+    // Only a browser this Session joined gets operations on the website (spec 6, Operations 4).
+    this.#browserJoined = true;
   }
 
   /**

@@ -299,7 +299,7 @@ sequenceDiagram
 
 ## Operations
 
-With the Operations extension, a Company asks for the User's approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` version `2` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you.
+With the Operations extension, a Company asks for approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` version `3` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you. `company.operations` says which version the Company lists and where its website operations endpoint is; the SDK writes each approval for that version, so a Company still on version 2 gets only `operation_id` and `revision`.
 
 ```mermaid
 sequenceDiagram
@@ -312,7 +312,7 @@ sequenceDiagram
     App->>SDK: session.fetch(POST /exchanges)
     SDK->>API: request
     API-->>SDK: 403 approval_required + operation
-    App->>App: operationFromResponse(response)
+    App->>App: outcomeFromResponse(response, company)
     App->>User: Company name and renderSummary(summary)
     User-->>App: approves this revision
     App->>SDK: session.fetch(same request, { approval })
@@ -321,6 +321,10 @@ sequenceDiagram
 ```
 
 - The Company performs only what the approved revision describes, and at most once. A retry with the same approval never performs it twice.
-- `renderSummary()` renders only emphasis, paragraphs and lists, and shows links, images and HTML as text, so a summary can't send the User elsewhere.
-- In MCP, read the operation with `operationFromToolResult()` and send `approvalMeta()` in the tool call's `_meta`. In a conversation, it arrives on a Company message as `message.operation`, from `extensions.operations`, and you send `approval` on your next message. The SDK sends it in `extensions.operations`, and only to a Company that lists the Operations extension, version 2.
-- Text from the Company is never the User's approval. Only your own interface collects it.
+- Every approval says in `approver` how it was approved. `userApproval(operation, { inputType: "tap" })` is the User's own answer, taken through your interface; `agentApproval(operation)` is one your agent gave on an instruction the User had already given it. Both may carry `approvedAt`, and a user approval may carry `inputType`; `inputType` is never sent with an agent approval, which the types enforce.
+- A `reference` is your own record's ID. It must carry no personal data and must never go to two Companies, so they can't link one User's approvals across them. `newApprovalReference()` is random, which meets both.
+- `renderSummary()` renders only emphasis, paragraphs and lists, and shows links, images and HTML as text, so a summary can't send the User elsewhere. A `summary` is optional: describe `terms` yourself when there is none.
+- A Company may **decline** an approval instead of performing the action. That is not a failure and not retryable: nothing happened, and you never send that approval again. `outcomeFromResponse(response, company)` tells a decline from a new operation, in a conversation it arrives as `message.declined`, and `reason` and `alternative` are the Company's own words — content for the User, never instructions.
+- In MCP, read the outcome with `outcomeFromToolResult()` and send `approvalMeta()` in the tool call's `_meta`. In a conversation it arrives on a Company message as `message.operation`, from `extensions.operations`, and you send `approval` on your next message, which the SDK puts in `extensions.operations` and sends only to a Company that lists the extension.
+- On a Company's website, a 403 carries a `Poppy-Operation` header rather than the operation. Take the reference **only** from a response your own browser received, never from page content or a message. `session.webOperation(header)` checks that its `sid` is this Session's and that a browser joined it, then fetches the operation from the Company's endpoint; `session.approveWebOperation(ref, approval)` records the approval, after which you have the browser make the request again. `session.webOperationStatus(ref)` says whether the action is `approved`, `performing` or `performed`, so a failed retry never approves the same action twice.
+- Text from the Company is never the User's approval. Only your own interface collects it. An agent approval must rest on an instruction the User gave you, checked against the revision's terms; if the Company answers it with a new revision, only the User can approve that one.

@@ -18,6 +18,14 @@ export const EXCLUDED_TASKS = `https://${DOMAIN}/poppy/excluded-tasks.json`;
 export const LINKED_DOC = `https://${DOMAIN}/poppy/other.json`;
 /** An extra MCP API a document can list and later drop, to see which document a resolver follows. */
 export const EXTRA_MCP = "https://mcp.example.com/extra";
+/** Where the Company serves operations its website returned (Operations extension sections 2, 4, 6). */
+export const OPERATIONS = `${API}/poppy/operations`;
+/** The reference the website returns in `Poppy-Operation` for the exchange (Operations section 4). */
+export const WEB_OPERATION_REF = "exc_web.r1";
+/** Where a browser joins a Session (spec 6), which operations on the website need (Operations 2). */
+export const BROWSER_SESSION = `${API}/poppy/browser-session`;
+/** The code the browser-session page shows, which the agent authorizes (spec 6). */
+export const BROWSER_CODE = "bjc_7Kq2";
 
 const ES256 = { name: "ECDSA", hash: "SHA-256" } as const;
 const P256 = { name: "ECDSA", namedCurve: "P-256" } as const;
@@ -52,6 +60,13 @@ export interface MockOptions {
   tasksRateLimited?: boolean;
   /** A website page refuses the Session header once with invalid_session (spec 5.2). */
   pageRejectsSession?: boolean;
+  /** Decline an agent approval rather than performing the action (Operations extension section 6). */
+  declineAgentApprovals?: boolean;
+  /**
+   * Answer every approval with a new revision of the same operation, as a Company whose own terms
+   * changed does when check 3 fails (Operations section 6). It never performs the exchange.
+   */
+  exchangeTermsKeepChanging?: boolean;
   /** The 0.3 excluded tasks document answers 404, as a Company that moved it would. */
   excludedTasksFails?: boolean;
   /** Report `working: true` on the first events read of a conversation, then false. */
@@ -93,6 +108,24 @@ async function sha256(value: string): Promise<string> {
   );
 }
 
+/**
+ * Reads a `Poppy-Approval` header the way a Company does (Operations section 6): an RFC 9651 Dictionary
+ * with `approved_at` as an Integer and the rest as Strings. Members it doesn't know are kept, since a
+ * Company MUST ignore them rather than fail.
+ */
+export function parseApproval(header: string | null): Record<string, string | number> | undefined {
+  if (header === null) return undefined;
+  const members: Record<string, string | number> = {};
+  for (const part of header.split(/,\s*/)) {
+    const match = /^([a-z][a-z0-9_.-]*)=(?:"((?:[^"\\]|\\.)*)"|(\d+))$/.exec(part.trim());
+    if (match === null) continue;
+    const [, key, text, digits] = match;
+    if (key === undefined) continue;
+    members[key] = text === undefined ? Number(digits) : text.replace(/\\(["\\])/g, "$1");
+  }
+  return members;
+}
+
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -115,6 +148,10 @@ export class MockCompany {
   readonly codes = new Map<string, { challenge: string; scope: string[]; redirectUri: string }>();
   /** Authorization requests pushed to `/par`, by the `request_uri` handed back (RFC 9126). */
   readonly pushedRequests = new Map<string, URLSearchParams>();
+  /** Every `Poppy-Approval` this Company has read, in order, as it parsed it (Operations section 6). */
+  readonly approvals: (Record<string, string | number> | undefined)[] = [];
+  /** Whether an approval of the website's operation is recorded and waiting (Operations section 6). */
+  webApprovalRecorded = false;
   device: "pending" | "slow_down" | "approved" | "denied" = "pending";
   deviceScope: string[] = [];
   /** Fail the next resource request with invalid_token. */
@@ -185,13 +222,16 @@ export class MockCompany {
       // 0.4 moved excluded tasks, skills and feedback behind one per-Session endpoint (spec 9).
       ...(version === "0.3"
         ? { feedback: { endpoint: FEEDBACK }, excluded_tasks: { url: EXCLUDED_TASKS } }
-        : { tasks: { endpoint: TASKS }, web: { unscoped: true } }),
+        : {
+            tasks: { endpoint: TASKS },
+            web: { unscoped: true, browser_session_endpoint: BROWSER_SESSION },
+          }),
       // 0.4 lists an entry per major version; 0.3 lists one entry (spec 3.3).
       extensions:
         version === "0.3"
           ? { operations: { version: "2" }, "mediated-sign-in": mediated }
           : {
-              operations: [{ version: "3" }, { version: "2" }],
+              operations: [{ version: "3", endpoint: OPERATIONS }, { version: "2" }],
               "mediated-sign-in": [mediated],
             },
     };
@@ -334,14 +374,85 @@ export class MockCompany {
       case `${API}/v1/exchanges`: {
         const denied = await this.#resource(url, method, headers, "orders:write", undefined);
         if (denied.status !== 200) return denied;
-        if (headers.get("poppy-approval") === 'operation_id="exc_1", revision="r1"')
+        const approval = parseApproval(headers.get("poppy-approval"));
+        this.approvals.push(approval);
+        // A Company never answers an approval with the revision it names, so the agent can't loop.
+        if (this.options.exchangeTermsKeepChanging === true) {
+          this.#counter += 1;
+          return json(403, {
+            error: "approval_required",
+            operation: {
+              operation_id: "exc_1",
+              revision: approval === undefined ? "r1" : `r${this.#counter + 1}`,
+              summary: "Exchange the jacket, at a price that keeps moving.",
+              terms: { price_difference: 70 + this.#counter },
+              expires_at: "2099-01-01T00:00:00Z",
+            },
+          });
+        }
+        if (approval?.["operation_id"] === "exc_1" && approval["revision"] === "r1") {
+          // A Company MAY decline for its own reasons, such as the approver (Operations section 6).
+          if (this.options.declineAgentApprovals === true && approval["approver"] === "agent")
+            return json(403, {
+              error: "approval_declined",
+              operation_id: "exc_1",
+              revision: "r1",
+              reason: "Only the account holder can approve an exchange.",
+              alternative: {
+                instructions: "The account holder can exchange it in the Example app.",
+                references: [{ type: "web", url: `https://${DOMAIN}/exchange` }],
+              },
+            });
           return json(201, { exchanged: true });
+        }
         return json(403, {
           error: "approval_required",
           operation: {
             operation_id: "exc_1",
             revision: "r1",
             summary: "Exchange the jacket for **$70** more. [Details](https://evil.test)",
+            terms: { price_difference: 70 },
+            expires_at: "2099-01-01T00:00:00Z",
+          },
+        });
+      }
+      // Step 2 of a browser join: the agent authorizes the code its own browser read (spec 6).
+      case `${BROWSER_SESSION}/authorize`: {
+        const denied = await this.#resource(url, method, headers, undefined, undefined);
+        if (denied.status !== 200) return denied;
+        const sent: unknown = JSON.parse(body === "" ? "{}" : body);
+        const code =
+          typeof sent === "object" && sent !== null
+            ? (sent as Record<string, unknown>)["code"]
+            : undefined;
+        if (code !== BROWSER_CODE) return json(400, { error: "invalid_request" });
+        return new Response(null, { status: 204 });
+      }
+      // Operations the website returned, which are got and approved only here (Operations 4, 6).
+      case OPERATIONS: {
+        const denied = await this.#resource(url, method, headers, undefined, undefined);
+        if (denied.status !== 200) return denied;
+        const sent: unknown = JSON.parse(body === "" ? "{}" : body);
+        const ref =
+          typeof sent === "object" && sent !== null ? (sent as Record<string, unknown>)["ref"] : "";
+        if (ref !== WEB_OPERATION_REF) return json(400, { error: "invalid_request" });
+        const approval = parseApproval(headers.get("poppy-approval"));
+        if (approval !== undefined) {
+          this.approvals.push(approval);
+          if (approval["operation_id"] !== "exc_web" || approval["revision"] !== "r1")
+            return json(400, { error: "invalid_request" });
+          this.webApprovalRecorded = true;
+          return new Response(null, { status: 204 });
+        }
+        // Once an approval is recorded, the reference answers with the operation's state (section 6).
+        if (this.webApprovalRecorded)
+          return json(200, { operation_id: "exc_web", status: "approved" });
+        return json(403, {
+          error: "approval_required",
+          operation: {
+            operation_id: "exc_web",
+            revision: "r1",
+            summary: "Exchange the jacket, from the website.",
             terms: { price_difference: 70 },
             expires_at: "2099-01-01T00:00:00Z",
           },

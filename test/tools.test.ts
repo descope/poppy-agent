@@ -10,15 +10,17 @@ import {
   toMcpTools,
   toOpenAITools,
 } from "../src/index.ts";
-import { API, CLIENT_ID, MockCompany } from "./mock-company.ts";
+import { API, CLIENT_ID, MockCompany, type MockOptions } from "./mock-company.ts";
 
-async function setup() {
-  const mock = await MockCompany.create();
+async function setup(options: MockOptions = {}, operationsVersion = "2") {
+  const mock = await MockCompany.create(options);
   const agent = new PoppyAgent({
     clientId: CLIENT_ID,
     signingKey: { privateKey: mock.agentKey.privateKey, kid: "k1" },
     fetch: mock.fetch,
     redirectUri: "https://agent.example/callback",
+    // The tools handle operations, so the agent declares the extension (Operations section 2).
+    extensions: { operations: { version: operationsVersion } },
   });
   const company = await agent.discover("example.com");
   const user = await agent.user(company, "alice");
@@ -111,8 +113,58 @@ describe("poppyTools", () => {
       "poppy_request",
       request,
     );
-    expect(approved).toMatchObject({ approved_by_user: true, status: 201 });
+    expect(approved).toMatchObject({ approved_by: "user", status: 201 });
     expect(shown).toContain("Example Company: <p>Exchange the jacket for <strong>$70</strong>");
+  });
+
+  it("carries an agent approval, and reports a decline as final rather than retrying", async () => {
+    const { mock, user, signIn } = await setup(
+      { version: "1.0", declineAgentApprovals: true },
+      "3",
+    );
+    const request = { method: "POST", url: `${API}/v1/exchanges`, body: { item: "itm_1" } };
+    await signIn({ scope: ["orders:write"] });
+    const result = await runTool(
+      poppyTools({ user, requestApproval: async () => ({ approver: "agent" as const }) }),
+      "poppy_request",
+      request,
+    );
+    expect(result).toMatchObject({
+      performed: false,
+      declined: {
+        operation_id: "exc_1",
+        reason: "Only the account holder can approve an exchange.",
+      },
+    });
+    expect(String(result["note"])).toContain("Do not send this approval again");
+    // Declined once and never sent again (Operations section 7).
+    expect(mock.approvals.filter((a) => a?.["approver"] === "agent")).toHaveLength(1);
+  });
+
+  it("asks the User about terms that answered an agent approval, and refuses another agent one", async () => {
+    const { user, signIn } = await setup({ version: "1.0", exchangeTermsKeepChanging: true }, "3");
+    const request = { method: "POST", url: `${API}/v1/exchanges`, body: { item: "itm_1" } };
+    await signIn({ scope: ["orders:write"] });
+    const asked: boolean[] = [];
+    const result = await runTool(
+      poppyTools({
+        user,
+        requestApproval: async ({ mustAskUser }) => {
+          asked.push(mustAskUser);
+          return { approver: "agent" as const };
+        },
+      }),
+      "poppy_request",
+      request,
+    );
+    // The first round is an agent approval; the new revision that answers it must go to the User
+    // (Operations section 5), so the agent approval offered for it is refused.
+    expect(asked).toEqual([false, true]);
+    expect(result).toMatchObject({
+      performed: false,
+      approval_required: { operation_id: "exc_1" },
+    });
+    expect(String(result["note"])).toContain("only the User can approve");
   });
 
   it("refuses credential headers and hosts the Company didn't list", async () => {
