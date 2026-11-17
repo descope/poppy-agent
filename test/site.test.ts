@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { checkSite, formatSiteReport, type SiteResult } from "../src/conformance/site.ts";
+import { compatible, SUPPORTED_PROTOCOL_VERSIONS } from "../src/discovery.ts";
+import {
+  checkSite,
+  formatSiteReport,
+  NEWEST_VERSION,
+  type SiteResult,
+} from "../src/conformance/site.ts";
 
 const ORIGIN = "https://shop.test";
 const ISSUER = "https://auth.test/v1/apps/shop";
@@ -27,7 +33,10 @@ function issuerMetadata(overrides: Record<string, unknown> = {}): Record<string,
 function conformingSite(): Record<string, unknown> {
   return {
     [`${ORIGIN}/.well-known/poppy.json`]: {
-      protocol_version: "0.4",
+      // The version agents prefer, so `discovery.version-current` passes on a site that is current.
+      // Taken from NEWEST_VERSION, not pinned: pinning a literal only moves this breakage to the
+      // next version the SDK adds, which is how adding 1.0 broke every case here in the first place.
+      protocol_version: NEWEST_VERSION,
       organization: { name: "Shop", domain: "shop.test" },
       auth: { issuer: ISSUER, scopes: { "orders:read": "See your orders" } },
       apis: [{ type: "mcp", url: MCP }],
@@ -619,12 +628,12 @@ describe("checkSite", () => {
     documents[`${ORIGIN}/.well-known/poppy.json`] = {
       ...doc,
       protocol_version: "9.9",
-      supported_versions: { "0.4": `${ORIGIN}/poppy-0.4.json` },
+      supported_versions: { [NEWEST_VERSION]: `${ORIGIN}/poppy-linked.json` },
     };
     // `discover()` fetches the linked document, so a link to nothing is not a version on offer.
     expect(byId(await check(documents), "discovery.version-supported")?.ok).toBe(false);
 
-    documents[`${ORIGIN}/poppy-0.4.json`] = { ...doc, protocol_version: "0.4" };
+    documents[`${ORIGIN}/poppy-linked.json`] = { ...doc, protocol_version: NEWEST_VERSION };
     const linked = await check(documents);
     expect(byId(linked, "discovery.version-supported")?.ok).toBe(true);
     expect(byId(linked, "discovery.version-current")?.ok).toBe(true);
@@ -637,11 +646,11 @@ describe("checkSite", () => {
     documents[`${ORIGIN}/.well-known/poppy.json`] = {
       ...doc,
       protocol_version: "9.9",
-      supported_versions: { "0.4": `${ORIGIN}/poppy-0.4.json` },
+      supported_versions: { [NEWEST_VERSION]: `${ORIGIN}/poppy-linked.json` },
     };
-    documents[`${ORIGIN}/elsewhere.json`] = { ...doc, protocol_version: "0.4" };
+    documents[`${ORIGIN}/elsewhere.json`] = { ...doc, protocol_version: NEWEST_VERSION };
     const results = await check(documents, {
-      [`${ORIGIN}/poppy-0.4.json`]: `${ORIGIN}/elsewhere.json`,
+      [`${ORIGIN}/poppy-linked.json`]: `${ORIGIN}/elsewhere.json`,
     });
     expect(byId(results, "discovery.version-supported")?.ok).toBe(false);
   });
@@ -832,5 +841,49 @@ describe("formatSiteReport", () => {
     const report = formatSiteReport("shop.test", await check(conformingSite()));
     expect(report).toContain("0 failing (0 MUST)");
     expect(report).not.toContain("✗");
+  });
+});
+
+describe("version selection from 1.0 (spec 3.4)", () => {
+  /** A version one minor newer than the one agents prefer. */
+  const NEWER_MINOR = `${NEWEST_VERSION.split(".")[0]}.${Number(NEWEST_VERSION.split(".")[1]) + 1}`;
+  /** The newest version this SDK implements that is NOT compatible with the preferred one. */
+  const BEHIND = SUPPORTED_PROTOCOL_VERSIONS.find((v) => !compatible(v, NEWEST_VERSION)) ?? "";
+
+  function serving(version: string): Record<string, unknown> {
+    const documents = conformingSite();
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = { ...doc, protocol_version: version };
+    return documents;
+  }
+
+  it("counts a site a minor version ahead as current, not as one no agent can speak", async () => {
+    // The rule holds because agents now prefer a 1.x version; before 1.0 every minor broke.
+    expect(Number(NEWEST_VERSION.split(".")[0])).toBeGreaterThanOrEqual(1);
+    const results = await check(serving(NEWER_MINOR));
+    // An agent uses that document as it stands and declares the version it implements, so the site
+    // is neither unsupported nor behind.
+    expect(byId(results, "discovery.version-supported")?.ok).toBe(true);
+    expect(byId(results, "discovery.version-current")?.ok).toBe(true);
+  });
+
+  it("still reports a site a major version behind as not current", async () => {
+    expect(BEHIND).not.toBe("");
+    const results = await check(serving(BEHIND));
+    // Usable — an agent speaks it — but a version agents no longer prefer, which is the finding.
+    expect(byId(results, "discovery.version-supported")?.ok).toBe(true);
+    expect(byId(results, "discovery.version-current")?.ok).toBe(false);
+  });
+
+  it("follows a link to a version a minor ahead, which an agent would choose", async () => {
+    const documents = serving(BEHIND);
+    const doc = documents[`${ORIGIN}/.well-known/poppy.json`] as Record<string, unknown>;
+    documents[`${ORIGIN}/.well-known/poppy.json`] = {
+      ...doc,
+      supported_versions: { [NEWER_MINOR]: `${ORIGIN}/poppy-next.json` },
+    };
+    documents[`${ORIGIN}/poppy-next.json`] = { ...doc, protocol_version: NEWER_MINOR };
+    const results = await check(documents);
+    expect(byId(results, "discovery.version-current")?.ok).toBe(true);
   });
 });

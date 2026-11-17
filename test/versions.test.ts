@@ -8,7 +8,10 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
   supportedScopes,
 } from "../src/index.ts";
+import { PENDING_PREFIX } from "../src/account.ts";
 import { decodeJwt } from "../src/jose.ts";
+import type { Store } from "../src/store.ts";
+import { UcpClient, type UcpNegotiation } from "../src/ucp.ts";
 import { checkSignInUrl } from "../src/oauth.ts";
 import { extensionsHeader, throwable } from "../src/session.ts";
 import {
@@ -914,6 +917,8 @@ function hostedAt(options: {
   domain: string;
   /** The entry in the issuer's `protected_resources`; defaults to the domain with the scheme. */
   resource?: string;
+  /** `extensions`, for the cases that need the Company to list one (spec 3.3). */
+  extensions?: Record<string, unknown>;
 }): typeof fetch {
   const origin = `https://${options.host}`;
   const resource = options.resource ?? `https://${options.domain}`;
@@ -934,6 +939,7 @@ function hostedAt(options: {
               { type: "poppy", endpoint: `${origin}/poppy`, description: "Orders and returns" },
             ],
           },
+          ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
         });
       case `${origin}/.well-known/oauth-protected-resource`:
         return body({ resource: `${origin}`, authorization_servers: [ISSUER] });
@@ -1210,5 +1216,117 @@ describe("asking for the consent page from 1.0 (spec 4.2, 10.8)", () => {
     const { url } = await user.startDirectSignIn({ scope: "orders:read" });
     const uri = new URL(url).searchParams.get("request_uri") ?? "";
     expect(mock.pushedRequests.get(uri)?.get("prompt")).toBe("consent");
+  });
+});
+
+describe("review of PR #25", () => {
+  /** The smallest negotiation UcpClient's constructor reads (UCP extension 3, 4). */
+  function negotiationFrom(profileUrl: string): UcpNegotiation {
+    const origin = new URL(profileUrl).origin;
+    return {
+      business: {
+        url: profileUrl,
+        version: "2026-08-25",
+        supportedVersions: {},
+        services: {},
+        capabilities: {},
+        paymentHandlers: {},
+        keys: [],
+      },
+      version: "2026-08-25",
+      capabilities: {},
+      restEndpoint: `${origin}/ucp`,
+      mcpEndpoint: undefined,
+    };
+  }
+
+  const listsUcp = (doc: Record<string, unknown>) => ({
+    ...doc,
+    extensions: { ...(doc["extensions"] as Record<string, unknown>), ucp: [{ version: "1" }] },
+  });
+
+  it("takes a UCP profile from the Company's own origin, port and all", async () => {
+    // company.domain is `shop.test:8443` here, and `hostname` would drop the port, so comparing
+    // hostnames refused a profile served from the very origin discovery validated.
+    const company = await agentWith(
+      hostedAt({
+        host: "shop.test:8443",
+        version: "1.0",
+        domain: "shop.test:8443",
+        extensions: { ucp: [{ version: "1" }] },
+      }),
+    ).discover("shop.test:8443");
+    expect(company.ucp?.profileUrl).toBe("https://shop.test:8443/.well-known/ucp");
+    const user = await new PoppyAgent({
+      clientId: CLIENT_ID,
+      signingKey: { privateKey: AGENT_KEY.privateKey, kid: "k1" },
+      fetch: hostedAt({
+        host: "shop.test:8443",
+        version: "1.0",
+        domain: "shop.test:8443",
+        extensions: { ucp: [{ version: "1" }] },
+      }),
+    }).user(company, "alice");
+    expect(
+      () =>
+        new UcpClient({
+          negotiation: negotiationFrom("https://shop.test:8443/.well-known/ucp"),
+          profileUrl: "https://agent.example/ucp.json",
+          session: user.session(),
+        }),
+    ).not.toThrow();
+  });
+
+  it("refuses a UCP profile from another port of the Company's host", async () => {
+    // Another port is another origin, and the old hostname comparison let this through.
+    const mock = await MockCompany.create({ version: "0.4", poppy: listsUcp });
+    const agent = agentWith(mock.fetch);
+    const company = await agent.discover("example.com");
+    const user = await agent.user(company, "alice");
+    expect(
+      () =>
+        new UcpClient({
+          negotiation: negotiationFrom("https://example.com:8443/.well-known/ucp"),
+          profileUrl: "https://agent.example/ucp.json",
+          session: user.session(),
+        }),
+    ).toThrow(/isn't from example\.com/);
+  });
+
+  it("leaves no pending sign-in behind when the push is refused", async () => {
+    // The record holds the PKCE verifier, and the caller only indexes `state` once startDirect
+    // resolves — so one written before a failed push would sit in no index until the store was
+    // cleared by hand (spec 4.2).
+    const mock = await MockCompany.create({ version: "1.0", par: "required" });
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.href === `${ISSUER}/par`)
+        return new Response(JSON.stringify({ error: "invalid_request" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      return mock.fetch(input, init);
+    }) as typeof fetch;
+    const written: string[] = [];
+    const store = new MemoryStore();
+    const recording: Store = {
+      get: (key) => store.get(key),
+      set: async (key, value) => {
+        written.push(key);
+        await store.set(key, value);
+      },
+      delete: (key) => store.delete(key),
+    };
+    const agent = new PoppyAgent({
+      clientId: CLIENT_ID,
+      signingKey: { privateKey: AGENT_KEY.privateKey, kid: "k1" },
+      fetch: fetchFn,
+      store: recording,
+      redirectUri: "https://agent.example/callback",
+    });
+    const company = await agent.discover("example.com");
+    const user = await agent.user(company, "alice");
+    await expect(user.startDirectSignIn({ scope: "orders:read" })).rejects.toThrow();
+    expect(written.filter((key) => key.startsWith(PENDING_PREFIX))).toEqual([]);
   });
 });

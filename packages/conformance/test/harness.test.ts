@@ -72,6 +72,7 @@ describe("expected-failures baselines", () => {
     {
       scenario: "sign-in-dpop",
       description: "",
+      protocolVersion: "0.4",
       stepErrors: [],
       checks: [
         { id: "oauth.dpop", status: "fail", details: ["no proof"] },
@@ -81,6 +82,7 @@ describe("expected-failures baselines", () => {
     {
       scenario: "signed-out",
       description: "",
+      protocolVersion: "0.4",
       stepErrors: [],
       checks: [{ id: "session.header", status: "pass", details: [] }],
     },

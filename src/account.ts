@@ -313,7 +313,6 @@ export class Account {
       scope,
       expiresAt: Date.now() + PENDING_LIFETIME,
     };
-    await this.#init.store.set(`${PENDING_PREFIX}${state}`, JSON.stringify(record));
     const params: Record<string, string> = {
       response_type: "code",
       client_id: this.#init.clientId,
@@ -343,6 +342,12 @@ export class Account {
     } else {
       for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
     }
+    // Written last, once there is a sign-in to remember. Pushing can fail (4.2), and the caller only
+    // adds `state` to the index that sweeps expired records after this resolves — so a record written
+    // before the push would survive a failed one in no index, with the PKCE verifier in it, until the
+    // store was cleared by hand. Nothing between here and the record reads it, and the URL hasn't
+    // reached the caller yet, so there is no window the other way.
+    await this.#init.store.set(`${PENDING_PREFIX}${state}`, JSON.stringify(record));
     return { url: url.href, state };
   }
 

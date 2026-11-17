@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { type AgentFactory, formatReport, runConformance } from "../src/conformance/index.ts";
+import {
+  type AgentFactory,
+  formatReport,
+  runConformance,
+  type ScenarioResult,
+  summarize,
+} from "../src/conformance/index.ts";
 import { BROWSER_SESSION } from "../src/conformance/company.ts";
 import {
   approvalFor,
@@ -12,6 +18,7 @@ import {
   PoppyError,
   type PoppyUser,
   type Session,
+  SUPPORTED_PROTOCOL_VERSIONS,
 } from "../src/index.ts";
 
 const CLIENT_ID = "https://agent.test/agent.json";
@@ -238,7 +245,39 @@ describe("conformance suite", () => {
       "tasks.not-excluded": "skip",
     });
     expect(formatReport(report)).toMatch(
-      /^Personal Agent Protocol 1\.0, 0\.4, 0\.3 conformance: \d+ passed, \d+ failed, \d+ skipped/,
+      // The versions the scenarios served, not the versions the SDK implements: no scenario
+      // serves 1.0, so the report must not claim to have checked an agent at 1.0.
+      /^Personal Agent Protocol 0\.4, 0\.3 conformance: \d+ passed, \d+ failed, \d+ skipped/,
     );
+  });
+});
+
+describe("what the report claims it checked", () => {
+  const scenario = (name: string, protocolVersion: string): ScenarioResult => ({
+    scenario: name,
+    description: "",
+    protocolVersion,
+    stepErrors: [],
+    checks: [{ id: "session.header", status: "pass", details: [] }],
+  });
+
+  it("names the versions the scenarios served, newest first and without repeats", () => {
+    const report = summarize([
+      scenario("a", "0.3"),
+      scenario("b", "0.4"),
+      scenario("c", "0.4"),
+      scenario("d", "1.0"),
+    ]);
+    expect(report.protocolVersions).toEqual(["1.0", "0.4", "0.3"]);
+  });
+
+  it("doesn't claim a version no scenario served, however many the SDK implements", () => {
+    // The SDK implements 1.0, 0.4 and 0.3. A suite that only ran 0.4 Companies has said nothing
+    // about an agent at 1.0, and a passing report is the stronger claim, so it must not say 1.0.
+    const report = summarize([scenario("a", "0.4"), scenario("b", "0.4")]);
+    expect(report.protocolVersions).toEqual(["0.4"]);
+    expect(SUPPORTED_PROTOCOL_VERSIONS).toContain("1.0");
+    expect(formatReport(report)).toContain("Personal Agent Protocol 0.4 conformance");
+    expect(formatReport(report)).not.toContain("1.0");
   });
 });

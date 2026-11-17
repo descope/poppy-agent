@@ -1,4 +1,3 @@
-import { SUPPORTED_PROTOCOL_VERSIONS } from "../discovery.ts";
 import { CHECKS, type Check } from "./checks.ts";
 import { ConformanceCompany } from "./company.ts";
 import { SCENARIOS, type ScenarioDefinition, type Step } from "./scenarios.ts";
@@ -73,6 +72,8 @@ export interface ScenarioCheck {
 export interface ScenarioResult {
   scenario: string;
   description: string;
+  /** The protocol version this scenario's Company served, and so the one it held the agent to. */
+  protocolVersion: string;
   checks: ScenarioCheck[];
   /** Steps the agent couldn't carry out, with why. Expected in scenarios it should refuse. */
   stepErrors: string[];
@@ -85,7 +86,12 @@ export interface CheckResult extends Check {
 }
 
 export interface ConformanceReport {
-  /** The spec versions the suite checks, newest first. */
+  /**
+   * The spec versions the scenarios that ran actually served, newest first — NOT the versions this
+   * SDK implements. A report names only what it tested: a suite with no Company at a version has
+   * said nothing about an agent at that version, and because a clean report is the stronger claim,
+   * an unearned one is the more damaging. `SUPPORTED_PROTOCOL_VERSIONS` is the other question.
+   */
   protocolVersions: readonly string[];
   scenarios: ScenarioResult[];
   /** Every check, across all scenarios: failed if any scenario failed it. */
@@ -110,7 +116,25 @@ export function scenarioResult(
       details,
     }))
     .sort((a, b) => order(a.id) - order(b.id));
-  return { scenario: definition.name, description: definition.description, checks, stepErrors };
+  return {
+    scenario: definition.name,
+    description: definition.description,
+    protocolVersion: company.version,
+    checks,
+    stepErrors,
+  };
+}
+
+/**
+ * The versions the scenarios served, newest first and without repeats. Ordered by `major.minor`, with
+ * anything that isn't one left at the end rather than dropped, so a malformed version still shows.
+ */
+function servedVersions(scenarios: readonly ScenarioResult[]): string[] {
+  const order = (version: string) => {
+    const match = /^(\d+)\.(\d+)$/.exec(version);
+    return match === null ? -1 : Number(match[1]) * 100_000 + Number(match[2]);
+  };
+  return [...new Set(scenarios.map((s) => s.protocolVersion))].sort((a, b) => order(b) - order(a));
 }
 
 /** Rolls scenario results up into one verdict per check. */
@@ -128,7 +152,7 @@ export function summarize(scenarios: ScenarioResult[]): ConformanceReport {
     };
   });
   return {
-    protocolVersions: SUPPORTED_PROTOCOL_VERSIONS,
+    protocolVersions: servedVersions(scenarios),
     scenarios,
     results,
     passed: results.filter((r) => r.status === "pass").length,
