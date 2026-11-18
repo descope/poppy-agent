@@ -6,7 +6,7 @@
 
 <!-- prettier-ignore -->
 > [!NOTE]
-> **This is a community SDK, not owned by any vendor.** It works with any Company and any authorization server that follows the spec. For a feature or a larger change, please [open an issue](https://github.com/descope/poppy-js/issues/new) first; see [CONTRIBUTING.md](CONTRIBUTING.md).
+> **This is a community SDK, not owned by any vendor.** It works with any Company and any authorization server that follows the spec. For a feature or a larger change, please [open an issue](https://github.com/descope/poppy-agent/issues/new) first; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ![Apache-2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue) ![Spec 1.0, 0.4 and 0.3](https://img.shields.io/badge/spec-1.0%20%7C%200.4%20%7C%200.3-purple) ![Node.js 22+](https://img.shields.io/badge/node-%E2%89%A522-green)
 
@@ -163,7 +163,7 @@ For a runnable script, see [`examples/quickstart.ts`](examples/quickstart.ts).
 
 ## Contributing
 
-Issues and pull requests are welcome on GitHub at <https://github.com/descope/poppy-js>. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines, and [MAINTAINERS.md](MAINTAINERS.md) for who maintains the project. Questions about the protocol itself belong in the [specification's repository](https://github.com/personal-agent-protocol/personal-agent-protocol/issues).
+Issues and pull requests are welcome on GitHub at <https://github.com/descope/poppy-agent>. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines, and [MAINTAINERS.md](MAINTAINERS.md) for who maintains the project. Questions about the protocol itself belong in the [specification's repository](https://github.com/personal-agent-protocol/personal-agent-protocol/issues).
 
 This project follows a [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities as [SECURITY.md](SECURITY.md) describes.
 
