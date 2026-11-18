@@ -301,7 +301,11 @@ sequenceDiagram
 
 With the Operations extension, a Company asks for approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you.
 
-The extension is used only where both sides name the same version (extension section 2), and an agent declares **one** version of it per Company (spec 3.3). So the version you declare has to be one the Company lists: `company.operations` says which versions it lists and where its website operations endpoint is. Declare `3` and a Company still on version 2 shares no version with you — it handles approval itself, and `session.fetch(..., { approval })` throws rather than send an approval neither side agreed on. Declare `2` and you get version 2's approval, carrying `operation_id` and `revision` alone, from a Company that lists either. Until `extensions` can hold a version per Company, pick the one your Companies list.
+The extension applies only where your declared version and one the Company lists are the same string (extension section 2), and an agent declares **one** version of an extension per Company (spec 3.3). `session.operationsVersion` is that shared version, or `undefined` when there isn't one — and with no shared version `session.fetch(..., { approval })` throws rather than send an approval neither side agreed on. The Company handles approval itself in that case, on its own website or in a Direct Conversation.
+
+It cuts both ways, so the version you declare is a real choice: declare `3` and a Company listing only `2` shares nothing with you; declare `2` and a Company listing only `3` shares nothing either. Version 3 adds `approver`, `approved_at`, `input_type` and `reference` to an approval, and a website operations endpoint; version 2 carries `operation_id` and `revision` alone. `extensions` on the `PoppyAgent` holds one version for every Company, so until it can hold one per Company, declare the version your Companies list.
+
+To ask whether a particular Company lists a version, call `companySupports(company, "operations", "2")`. `company.operations` answers a different question: it is the newest version **this SDK implements** that the Company lists, with the website `endpoint` for version 3 — a Company listing both 3 and 2 reads as `version: "3"`, so it won't tell you a version 2 is also on offer.
 
 ```mermaid
 sequenceDiagram
