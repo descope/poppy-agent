@@ -32,12 +32,36 @@ CI runs the same checks on Node.js 22, 24 and 26.
 
 ## Releases
 
-[release-please](https://github.com/googleapis/release-please) reads the Conventional Commit messages on `main` (`feat:`, `fix:`, `feat!:`) and keeps a release pull request open with the next version and changelog. Merging that pull request tags the release, and `.github/workflows/release.yml` then publishes to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers) (GitHub OIDC, no npm token). npm adds a provenance attestation once the repository is public. Nothing is published on other pushes.
+[release-please](https://github.com/googleapis/release-please) reads the Conventional Commit messages on `main` (`feat:`, `fix:`, `feat!:`) and keeps a release pull request open with the next version and changelog. Merging that pull request tags the release, and `.github/workflows/release.yml` then publishes to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers) (GitHub OIDC, no npm token). npm adds a provenance attestation once the repository is public.
+
+Every other push to `main` publishes a throwaway build under the `next` tag, versioned `0.0.0-next-<sha>-<date>` so that it sorts below any real release and `npm install @descope/poppy-agent` never picks one up.
 
 The workflow needs:
 
 - Repository secrets `RELEASE_APP_ID` and `RELEASE_APP_PEM`: the GitHub App that opens the release pull request.
 - A trusted publisher on npmjs.com for `@descope/poppy-agent` (package Settings, Trusted publishing, GitHub Actions): organization `descope`, repository `poppy-agent`, workflow `release.yml`, no environment, `npm publish` allowed.
+
+### The first publish is by hand
+
+A trusted publisher lives in a package's own settings, so there is nowhere to configure one until the package exists. Until a maintainer has published `@descope/poppy-agent` once, every push to `main` fails the same way:
+
+```
+npm error 404 Not Found - PUT https://registry.npmjs.org/@descope%2fpoppy-agent
+```
+
+Do that publish from a checkout of `main`, signed in to npm as someone who may publish under the `descope` scope:
+
+```bash
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run build
+npm version "0.0.0-next-$(git rev-parse --short=8 HEAD)-$(date +'%Y%m%d')" --no-git-tag-version
+npm publish --access=public --tag next
+git checkout package.json
+```
+
+A `next` build rather than the release itself: it creates the package without spending a version number, and leaves the real release to come out of CI with the provenance attestation that a publish from a laptop cannot produce.
+
+Then add the trusted publisher described above. npm gives a new configuration **two days** to complete its first successful publish; one that misses the window expires and has to be deleted and created again, so merge the release pull request — or let one push to `main` land — inside it. npm does not check the organization, repository or workflow filename when you save them, so a typo shows up only as a failed publish.
 
 ## Reporting security issues
 
