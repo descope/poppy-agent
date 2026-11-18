@@ -280,6 +280,38 @@ describe("poppyTools", () => {
     });
   });
 
+  it("shows the model a message whose role a later version added", async () => {
+    // Spec 8.9: a Personal Agent treats a `role` it doesn't recognize as content from the Company.
+    // Dropping it hid the Company's reply from the model and, because nothing counted as a reply,
+    // spent the whole conversation wait before returning.
+    const { user } = await setup({
+      version: "1.0",
+      conversationEvents: [
+        [
+          {
+            id: "evt_1",
+            type: "message",
+            created_at: "2026-10-08T19:05:00Z",
+            message: {
+              id: "msg_1",
+              role: "supervisor",
+              author: { type: "agent" },
+              text: "A later version wrote this.",
+            },
+          },
+        ],
+      ],
+    });
+    const tools = poppyTools({ user, conversationWait: 20 });
+    const started = Date.now();
+    const result = await runTool(tools, "poppy_conversation_send", { text: "Hello" });
+    expect(result["events"]).toMatchObject([
+      { type: "message", from: "company_agent", text: "A later version wrote this." },
+    ]);
+    // It counted as the Company's reply, so the call settled instead of waiting out the 20 seconds.
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
   it("asks the User about new terms that answer an agent approval sent in an earlier call", async () => {
     // Turn 1 offers terms, which the agent approves on the User's instruction. Turn 2 is the read
     // that follows, where the Company's answer is a new revision: section 5 forbids approving that

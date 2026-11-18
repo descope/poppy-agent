@@ -3,6 +3,7 @@ import { scopesNeeded } from "./challenge.ts";
 import {
   Conversation,
   type ConversationEvent,
+  type ConversationMessage,
   type ConversationUpdate,
   type OutgoingMessage,
 } from "./conversations.ts";
@@ -129,11 +130,21 @@ function operationForModel(operation: Operation): ToolResult {
   };
 }
 
+/**
+ * Whether a message is the Company's side of the conversation. `user` is the agent's own, which the
+ * model wrote and doesn't need read back. Every other role counts: spec 8.9 says a Personal Agent
+ * treats a `role` it doesn't recognize as content from the Company, so a later version that adds one
+ * doesn't make its messages disappear before the model sees them.
+ */
+function fromCompany(message: ConversationMessage): boolean {
+  return message.role !== "user";
+}
+
 function eventForModel(event: ConversationEvent): ToolResult | undefined {
   switch (event.type) {
     case "message": {
       const { message } = event;
-      if (message.role !== "company") return undefined;
+      if (!fromCompany(message)) return undefined;
       return {
         type: "message",
         from: message.author.type === "human" ? "company_person" : "company_agent",
@@ -408,7 +419,7 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
     const deadline = Date.now() + wait * 1000;
     let update = first;
     for (;;) {
-      const replied = events.some((e) => e.type === "message" && e.message.role === "company");
+      const replied = events.some((e) => e.type === "message" && fromCompany(e.message));
       // The Company has said all it is going to for now once it has no work in progress (spec 8.7).
       const settled = update !== undefined && !update.hasMore && !update.working;
       const remaining = Math.ceil((deadline - Date.now()) / 1000);
