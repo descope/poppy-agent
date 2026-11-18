@@ -497,12 +497,24 @@ export function poppyTools(options: PoppyToolsOptions): PoppyTool[] {
         // What the Company did with the approval is the answer to this call, and sending one is
         // not the same as it being taken. `approved_by` alone would say the action happened, with
         // the decline buried among the events, and a model reads the top-level fields.
-        const settled = latestApprovalMessage(after);
+        // The decline of the operation THIS approval was for, if there is one. A decline of another
+        // operation, or terms for one, says nothing about this approval: taking the batch's last
+        // such message would report `approved_by` for a declined action whenever the Company
+        // declined and then offered other terms, and report another operation's decline as this
+        // one's outcome whenever that came last.
+        const declined = after
+          .flatMap((event) =>
+            event.type === "message" &&
+            event.message.declined?.operationId === operation.operationId
+              ? [event.message.declined]
+              : [],
+          )
+          .at(-1);
         return {
           ...result,
-          ...(settled?.declined === undefined
+          ...(declined === undefined
             ? { approved_by: approval.approver }
-            : { approval: declinedForModel(settled.declined) }),
+            : { approval: declinedForModel(declined) }),
           events: [
             ...(result["events"] as unknown[]),
             ...after.map(eventForModel).filter((e) => e !== undefined),

@@ -236,6 +236,50 @@ describe("poppyTools", () => {
     },
   });
 
+  it("answers with the decline of the approved action, not the batch's last message", async () => {
+    // The Company declines the approved exc_1 and, in the same batch, offers terms for a different
+    // action. The decline is this approval's outcome; the other operation says nothing about it.
+    // Reading the batch's last such message instead reported `approved_by` for a declined action.
+    const { user, signIn } = await setup(
+      {
+        version: "1.0",
+        conversationEvents: [
+          [operationsEvent("evt_1", terms("r1"))],
+          // The answer to the approval POST: the decline of exc_1, then terms for a different action.
+          [
+            operationsEvent("evt_declined", {
+              declined: {
+                operation_id: "exc_1",
+                revision: "r1",
+                reason: "That jacket is out of stock.",
+              },
+            }),
+            operationsEvent("evt_other", {
+              operation: {
+                operation_id: "exc_2",
+                revision: "r1",
+                summary: "Exchange the boots instead.",
+                expires_at: "2099-01-01T00:00:00Z",
+              },
+            }),
+          ],
+        ],
+      },
+      "3",
+    );
+    await signIn({ scope: ["orders:read"] });
+    const tools = poppyTools({
+      user,
+      conversationWait: 1,
+      requestApproval: async () => ({ approver: "user" as const }),
+    });
+    const started = await runTool(tools, "poppy_conversation_send", { text: "Exchange it" });
+    expect(started).not.toHaveProperty("approved_by");
+    expect(started).toMatchObject({
+      approval: { performed: false, declined: { operation_id: "exc_1" } },
+    });
+  });
+
   it("asks the User about new terms that answer an agent approval sent in an earlier call", async () => {
     // Turn 1 offers terms, which the agent approves on the User's instruction. Turn 2 is the read
     // that follows, where the Company's answer is a new revision: section 5 forbids approving that

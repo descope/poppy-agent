@@ -299,7 +299,9 @@ sequenceDiagram
 
 ## Operations
 
-With the Operations extension, a Company asks for approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` version `3` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you. `company.operations` says which version the Company lists and where its website operations endpoint is; the SDK writes each approval for that version, so a Company still on version 2 gets only `operation_id` and `revision`.
+With the Operations extension, a Company asks for approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you.
+
+The extension is used only where both sides name the same version (extension section 2), and an agent declares **one** version of it per Company (spec 3.3). So the version you declare has to be one the Company lists: `company.operations` says which versions it lists and where its website operations endpoint is. Declare `3` and a Company still on version 2 shares no version with you — it handles approval itself, and `session.fetch(..., { approval })` throws rather than send an approval neither side agreed on. Declare `2` and you get version 2's approval, carrying `operation_id` and `revision` alone, from a Company that lists either. Until `extensions` can hold a version per Company, pick the one your Companies list.
 
 ```mermaid
 sequenceDiagram
