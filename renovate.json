@@ -1,4 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>descope/renovate-config"]
+  "extends": ["local>descope/renovate-config"],
+  "packageRules": [
+    {
+      "description": "Hold pnpm at 11. pnpm 12 ships a native binary installed by a postinstall script and no longer carries bin/pnpm.cjs, which is what corepack and pnpm's own pre-11 launcher start. With pnpm@12 in packageManager, both fail with MODULE_NOT_FOUND before any command runs, so the repository cannot be installed locally. CI is unaffected because pnpm/action-setup installs pnpm itself. Lift this once corepack can launch pnpm 12, or once the project drops corepack for pnpm's own version management.",
+      "matchDepNames": ["pnpm"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ]
 }

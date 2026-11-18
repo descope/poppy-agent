@@ -1,6 +1,6 @@
 {
-  "name": "@descope/poppy",
-  "version": "0.0.0",
+  "name": "@descope/poppy-agent",
+  "version": "1.0.0",
   "description": "TypeScript Personal Agent SDK for the Personal Agent Protocol (Poppy) 1.0, 0.4 and 0.3: version selection, discovery, delegated Session JWTs, Direct, Device and Mediated Sign-In, APIs, browser join, conversations, task coverage and operations.",
   "keywords": [
     "agent",
@@ -13,15 +13,15 @@
     "poppy",
     "sdk"
   ],
-  "homepage": "https://github.com/descope/poppy-js#readme",
+  "homepage": "https://github.com/descope/poppy-agent#readme",
   "bugs": {
-    "url": "https://github.com/descope/poppy-js/issues"
+    "url": "https://github.com/descope/poppy-agent/issues"
   },
   "license": "Apache-2.0",
   "author": "Descope",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/descope/poppy-js.git"
+    "url": "git+https://github.com/descope/poppy-agent.git"
   },
   "files": [
     "dist"
@@ -33,30 +33,25 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./conformance": {
-      "types": "./dist/conformance/index.d.ts",
-      "default": "./dist/conformance/index.js"
-    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && pnpm --filter @descope/poppy-conformance run build",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --deny-warnings",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "test": "vitest run",
-    "conformance": "node packages/conformance/src/cli.ts agent --command \"node examples/conformance-agent.ts\""
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
     "@vitest/coverage-v8": "5.0.5",
-    "ai": "7.0.154",
-    "oxfmt": "0.74.0",
-    "oxlint": "1.89.0",
+    "ai": "7.0.156",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   },

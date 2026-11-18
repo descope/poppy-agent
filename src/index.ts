@@ -4,6 +4,7 @@ export { PoppyAgent, PoppyUser } from "./agent.ts";
 export type { PoppyAgentOptions, UserOptions } from "./agent.ts";
 export { authChallenge, parseChallenges, scopesNeeded } from "./challenge.ts";
 export type { AuthChallenge } from "./challenge.ts";
+export { companyLabel, NAME_LIMIT, plainText } from "./content.ts";
 export { Conversation, Conversations, parseEvent } from "./conversations.ts";
 export type {
   Author,
@@ -40,6 +41,7 @@ export type {
   MediatedSignInConfig,
   MediatedSignInField,
   OAuthServer,
+  OperationsExtensionInfo,
   ScopeHint,
   Skill,
   UcpExtensionInfo,
@@ -52,17 +54,43 @@ export type { Signer, SigningAlgorithm, SigningKey } from "./jose.ts";
 export { clientMetadata, jwks } from "./metadata.ts";
 export type { ClientMetadataInput } from "./metadata.ts";
 export {
+  agentApproval,
+  approvalField,
   approvalFor,
   approvalHeader,
   approvalMeta,
+  checkApproval,
   isOperationExpired,
+  newApprovalReference,
   OPERATIONS_EXTENSION,
+  OPERATIONS_V2_VERSION,
+  OPERATIONS_VERSIONS,
   operationFromResponse,
   operationFromToolResult,
+  outcomeFromMessageExtension,
+  outcomeFromResponse,
+  outcomeFromToolResult,
+  parseDecline,
   parseOperation,
+  parseOperationHeader,
+  parseRfc3339,
+  parseWebOperationStatus,
   renderSummary,
+  userApproval,
 } from "./operations.ts";
-export type { Approval, Operation } from "./operations.ts";
+export type {
+  AgentApprovalOptions,
+  Approval,
+  ApprovalChoice,
+  Approver,
+  Decline,
+  Operation,
+  OperationOutcome,
+  OperationReference,
+  OperationsVersion,
+  UserApprovalOptions,
+  WebOperationStatus,
+} from "./operations.ts";
 export { operatorKeyId } from "./operator.ts";
 export type { OperatorSignatureOptions } from "./operator.ts";
 export { Session } from "./session.ts";
@@ -89,6 +117,7 @@ export {
 } from "./tools.ts";
 export type {
   AiSdkToolDefinition,
+  ApprovalAnswer,
   ApprovalRequest,
   JsonSchema,
   PoppyTool,

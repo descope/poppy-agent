@@ -269,6 +269,7 @@ describe("conversations against the conformance fake", () => {
         summary: "Exchange a test item.",
         terms: undefined,
         expiresAt: "2026-10-08T20:00:00Z",
+        expiresAtMs: Date.UTC(2026, 9, 8, 20),
       },
     ]);
   });

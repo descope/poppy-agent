@@ -1,13 +1,6 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      // Workspace packages import the SDK by name; test against the source, not a build.
-      "@descope/poppy/conformance": new URL("./src/conformance/index.ts", import.meta.url).pathname,
-      "@descope/poppy": new URL("./src/index.ts", import.meta.url).pathname,
-    },
-  },
   test: {
     coverage: {
       enabled: true,

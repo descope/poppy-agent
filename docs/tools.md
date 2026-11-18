@@ -46,9 +46,14 @@ Errors come back as results with an `error` field, so the model can recover, rat
 ```typescript
 const tools = poppyTools({
   user,
-  // Called when the Company asks for the User's approval of an operation.
-  requestApproval: async ({ company, summaryHtml }) =>
-    myUi.confirm(`${company.name} (${company.domain}) asks you to approve`, summaryHtml),
+  // Called when the Company asks for an operation to be approved.
+  requestApproval: async ({ company, operation, summaryHtml, mustAskUser }) =>
+    myUi.confirm(
+      `${companyLabel(company)} asks you to approve`,
+      // `summary` is optional: describe `terms` yourself when the Company sent none, or the User
+      // is approving a blank description.
+      summaryHtml === "" ? myUi.describe(operation.terms) : summaryHtml,
+    ),
   // Called when a request or the Company Agent needs the User's account.
   signIn: async ({ company, user, scope }) => {
     const device = await user.startDeviceSignIn({ scope });
@@ -63,7 +68,10 @@ const tools = poppyTools({
 ```
 
 - **Without `requestApproval`**, the tools never approve anything. A request that needs approval returns `performed: false` with the operation, so the model can tell the User.
-- **With it**, the tools show the User the Company's name and the summary as safe HTML, and send the approval only if they say yes. The Company performs the action at most once.
+- **With it**, the tools hand you the Company and the summary as safe HTML, and send the approval only if the User says yes. Name the Company with `companyLabel(company)`, which shows the verified domain and quotes the name the Company chose beside it, bounded and stripped of line breaks — a Company writes `organization.name` itself (spec 10.1). The Company performs the action at most once. Returning `true` means the User approved; return `{ approver: "agent" }` instead to state that your agent approved on an instruction the User had already given it, which you must have checked the terms against.
+- `mustAskUser` is true for terms the Company returned in answer to an agent approval, and for any revision of an action the Company has declined — sections 5 and 6 both send those to the User, whoever approved the one that was declined. Only the User can approve them, so an agent approval offered for them is refused and the result says the action wasn't performed.
+- `operation.summary` is optional. When there is none, `summaryHtml` is `""` and the terms are yours to describe: an approval the User gave against a blank description isn't one.
+- A **declined** approval comes back as `performed: false` with `declined`, not as an error. Nothing happened, and the tools never send that approval again. Any `reason` or `alternative` is the Company's own wording, passed to the model as content.
 - **Without `signIn`**, results say which scopes are needed, and sign-in is up to you.
 - **With it**, a request that needs the User's account signs them in and retries once.
 
@@ -74,7 +82,7 @@ The model can't skip these steps: approval and sign-in only happen inside your c
 ```typescript
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, jsonSchema, stepCountIs, tool } from "ai";
-import { poppyTools, toAiSdkTools } from "@descope/poppy";
+import { poppyTools, toAiSdkTools } from "@descope/poppy-agent";
 
 const { text } = await generateText({
   model: anthropic("claude-sonnet-5-5"),
@@ -90,7 +98,7 @@ Passing `tool` and `jsonSchema` in keeps this package free of a dependency on `a
 
 ```typescript
 import Anthropic from "@anthropic-ai/sdk";
-import { poppyTools, runTool, toAnthropicTools } from "@descope/poppy";
+import { poppyTools, runTool, toAnthropicTools } from "@descope/poppy-agent";
 
 const client = new Anthropic();
 const tools = poppyTools({ user, requestApproval, signIn });
@@ -129,7 +137,7 @@ for (;;) {
 
 ```typescript
 import { Server } from "@modelcontextprotocol/server";
-import { poppyTools, toMcpTools } from "@descope/poppy";
+import { poppyTools, toMcpTools } from "@descope/poppy-agent";
 
 const mcpTools = toMcpTools(poppyTools({ user, requestApproval, signIn }));
 const server = new Server({ name: "my-agent", version: "1.0.0" }, { capabilities: { tools: {} } });

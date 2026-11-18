@@ -37,7 +37,7 @@ CI runs the same checks on Node.js 22, 24 and 26.
 The workflow needs:
 
 - Repository secrets `RELEASE_APP_ID` and `RELEASE_APP_PEM`: the GitHub App that opens the release pull request.
-- A trusted publisher on npmjs.com for `@descope/poppy` (package Settings, Trusted publishing, GitHub Actions): organization `descope`, repository `poppy-js`, workflow `release.yml`, no environment, `npm publish` allowed.
+- A trusted publisher on npmjs.com for `@descope/poppy-agent` (package Settings, Trusted publishing, GitHub Actions): organization `descope`, repository `poppy-agent`, workflow `release.yml`, no environment, `npm publish` allowed.
 
 ## Reporting security issues
 

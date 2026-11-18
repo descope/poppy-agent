@@ -6,7 +6,7 @@
 
 <!-- prettier-ignore -->
 > [!NOTE]
-> **This is a community SDK, not owned by any vendor.** It works with any Company and any authorization server that follows the spec. For a feature or a larger change, please [open an issue](https://github.com/descope/poppy-js/issues/new) first; see [CONTRIBUTING.md](CONTRIBUTING.md).
+> **This is a community SDK, not owned by any vendor.** It works with any Company and any authorization server that follows the spec. For a feature or a larger change, please [open an issue](https://github.com/descope/poppy-agent/issues/new) first; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ![Apache-2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue) ![Spec 1.0, 0.4 and 0.3](https://img.shields.io/badge/spec-1.0%20%7C%200.4%20%7C%200.3-purple) ![Node.js 22+](https://img.shields.io/badge/node-%E2%89%A522-green)
 
@@ -37,7 +37,7 @@ This repository contains the TypeScript SDK for the **Personal Agent** side of t
 - **Task coverage**: a Company's excluded tasks, skills and feedback endpoint, from `poppy.json` on 0.3 or per Session from 0.4, behind one API
 - The **Operations**, **Links** and **Disclosures** extensions
 - **UCP**: through Poppy's UCP extension, discover a Company's Universal Commerce Protocol profile, negotiate, and check out with signed requests in the User's Poppy Session
-- **A conformance suite** that checks a Personal Agent in any language against the spec, which this SDK passes in full
+- **Conformance**: this SDK passes [the conformance suite](https://github.com/descope/poppy-conformance) in full, on every check
 - **Tools for models**: hand a Company to the Vercel AI SDK, Anthropic, OpenAI or any MCP client as tools, with secrets kept out of the model
 
 It has zero runtime dependencies, uses `fetch` and WebCrypto only, and runs on Node.js 22 or later.
@@ -73,11 +73,11 @@ Signed out, a request carries only the Session header, which says which Personal
 ## Installation
 
 ```bash
-npm install @descope/poppy
+npm install @descope/poppy-agent
 # or
-pnpm add @descope/poppy
+pnpm add @descope/poppy-agent
 # or
-yarn add @descope/poppy
+yarn add @descope/poppy-agent
 ```
 
 The package isn't published to npm yet. Until it is, install it from this repository.
@@ -87,7 +87,7 @@ The package isn't published to npm yet. Until it is, install it from this reposi
 Here is what a Personal Agent looks like. It finds a Company, asks its Company Agent a question while signed out, and calls an API, signing the User in when the API asks for their account:
 
 ```typescript
-import { PoppyAgent, scopesNeeded } from "@descope/poppy";
+import { PoppyAgent, scopesNeeded } from "@descope/poppy-agent";
 
 const agent = new PoppyAgent({
   clientId: "https://agent.example.net/agent.json",
@@ -125,7 +125,7 @@ Using an LLM framework? Hand the Company to your model as tools:
 
 ```typescript
 import { generateText, jsonSchema, tool } from "ai";
-import { poppyTools, toAiSdkTools } from "@descope/poppy";
+import { poppyTools, toAiSdkTools } from "@descope/poppy-agent";
 
 const tools = toAiSdkTools(poppyTools({ user, requestApproval, signIn }), { tool, jsonSchema });
 ```
@@ -148,14 +148,13 @@ For a runnable script, see [`examples/quickstart.ts`](examples/quickstart.ts).
 | Extensions       | Operations (`operationFromResponse()`, `approvalFor()`, `renderSummary()`), Links and Disclosures in messages, Mediated Sign-In, and UCP.                                                                                                      |
 | Tools for models | `poppyTools()`, with `toAiSdkTools()`, `toAnthropicTools()`, `toOpenAITools()` and `toMcpTools()`.                                                                                                                                             |
 | UCP              | `discoverCompanyUcp()`, `negotiateUcp()` and `UcpClient` for checkout, carts, catalog and orders, with signed requests in the User's Session.                                                                                                  |
-| Conformance      | `@descope/poppy/conformance` checks any Personal Agent against the spec's rules for agents.                                                                                                                                                    |
 
 ## Documentation
 
 - [Build your first Personal Agent](docs/get-started/first-agent.md): a step-by-step tutorial
 - [Tools for models](docs/tools.md): give a model a Company's APIs and Company Agent as tools, with the AI SDK, Anthropic, OpenAI or MCP
 - [UCP](docs/ucp.md): commerce with the Universal Commerce Protocol, next to Poppy
-- [Conformance](packages/conformance/README.md): test any Personal Agent, in any language, against the spec's rules, with a CLI, baselines and a GitHub Action
+- [Conformance](https://github.com/descope/poppy-conformance): test any Personal Agent, in any language, against the spec's rules, with a CLI, baselines and a GitHub Action — and check a Company's discovery chain
 - [How it works](docs/how-it-works.md): discovery, Sessions, sign-in, requests, browser join, conversations and operations, with sequence diagrams
 - [Security and storage](docs/security.md): what the SDK protects, what it stores, and what you must protect
 - [Troubleshooting](docs/troubleshooting.md): common errors and their fixes
@@ -164,7 +163,7 @@ For a runnable script, see [`examples/quickstart.ts`](examples/quickstart.ts).
 
 ## Contributing
 
-Issues and pull requests are welcome on GitHub at <https://github.com/descope/poppy-js>. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines, and [MAINTAINERS.md](MAINTAINERS.md) for who maintains the project. Questions about the protocol itself belong in the [specification's repository](https://github.com/personal-agent-protocol/personal-agent-protocol/issues).
+Issues and pull requests are welcome on GitHub at <https://github.com/descope/poppy-agent>. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines, and [MAINTAINERS.md](MAINTAINERS.md) for who maintains the project. Questions about the protocol itself belong in the [specification's repository](https://github.com/personal-agent-protocol/personal-agent-protocol/issues).
 
 This project follows a [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities as [SECURITY.md](SECURITY.md) describes.
 
