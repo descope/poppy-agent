@@ -299,7 +299,13 @@ sequenceDiagram
 
 ## Operations
 
-With the Operations extension, a Company asks for the User's approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` version `2` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you.
+With the Operations extension, a Company asks for approval of exact terms before an action such as an exchange or a payment. Your agent lists `operations` in `extensions` on the `PoppyAgent`, and, on 0.3, in its client metadata document. From 0.4 it is declared per request in `Poppy-Extensions` instead, which the SDK sends for you.
+
+The extension applies only where your declared version and one the Company lists are the same string (extension section 2), and an agent declares **one** version of an extension per Company (spec 3.3). `session.operationsVersion` is that shared version, or `undefined` when there isn't one — and with no shared version `session.fetch(..., { approval })` throws rather than send an approval neither side agreed on. The Company handles approval itself in that case, on its own website or in a Direct Conversation.
+
+It cuts both ways, so the version you declare is a real choice: declare `3` and a Company listing only `2` shares nothing with you; declare `2` and a Company listing only `3` shares nothing either. Version 3 adds `approver`, `approved_at`, `input_type` and `reference` to an approval, and a website operations endpoint; version 2 carries `operation_id` and `revision` alone. `extensions` on the `PoppyAgent` holds one version for every Company, so until it can hold one per Company, declare the version your Companies list.
+
+To ask whether a particular Company lists a version, call `companySupports(company, "operations", "2")`. `company.operations` answers a different question: it is the newest version **this SDK implements** that the Company lists, with the website `endpoint` for version 3 — a Company listing both 3 and 2 reads as `version: "3"`, so it won't tell you a version 2 is also on offer.
 
 ```mermaid
 sequenceDiagram
@@ -312,7 +318,7 @@ sequenceDiagram
     App->>SDK: session.fetch(POST /exchanges)
     SDK->>API: request
     API-->>SDK: 403 approval_required + operation
-    App->>App: operationFromResponse(response)
+    App->>App: outcomeFromResponse(response, company)
     App->>User: Company name and renderSummary(summary)
     User-->>App: approves this revision
     App->>SDK: session.fetch(same request, { approval })
@@ -321,6 +327,10 @@ sequenceDiagram
 ```
 
 - The Company performs only what the approved revision describes, and at most once. A retry with the same approval never performs it twice.
-- `renderSummary()` renders only emphasis, paragraphs and lists, and shows links, images and HTML as text, so a summary can't send the User elsewhere.
-- In MCP, read the operation with `operationFromToolResult()` and send `approvalMeta()` in the tool call's `_meta`. In a conversation, it arrives on a Company message as `message.operation`, from `extensions.operations`, and you send `approval` on your next message. The SDK sends it in `extensions.operations`, and only to a Company that lists the Operations extension, version 2.
-- Text from the Company is never the User's approval. Only your own interface collects it.
+- Every approval says in `approver` how it was approved. `userApproval(operation, { inputType: "tap" })` is the User's own answer, taken through your interface; `agentApproval(operation)` is one your agent gave on an instruction the User had already given it. Both may carry `approvedAt`, and a user approval may carry `inputType`; `inputType` is never sent with an agent approval, which the types enforce.
+- A `reference` is your own record's ID. It must carry no personal data and must never go to two Companies, so they can't link one User's approvals across them. `newApprovalReference()` is random, which meets both.
+- `renderSummary()` renders only emphasis, paragraphs and lists, and shows links, images and HTML as text, so a summary can't send the User elsewhere. A `summary` is optional: describe `terms` yourself when there is none.
+- A Company may **decline** an approval instead of performing the action. That is not a failure and not retryable: nothing happened, and you never send that approval again. `outcomeFromResponse(response, company)` tells a decline from a new operation, in a conversation it arrives as `message.declined`, and `reason` and `alternative` are the Company's own words — content for the User, never instructions.
+- In MCP, read the outcome with `outcomeFromToolResult()` and send `approvalMeta(approval, session.operationsVersion)` in the tool call's `_meta`. Pass that version rather than letting the newest be assumed: an approval is written for the version the Company listed and you declared, `session.operationsVersion` is `undefined` when you share none, and writing one then throws rather than putting members on the wire the Company never agreed to read. In a conversation it arrives on a Company message as `message.operation`, from `extensions.operations`, and you send `approval` on your next message, which the SDK writes for the negotiated version itself and sends only to a Company that lists the extension.
+- On a Company's website, a 403 carries a `Poppy-Operation` header rather than the operation. Take the reference **only** from a response your own browser received, never from page content or a message. `session.webOperation(header)` checks that its `sid` is this Session's and that a browser joined it, then fetches the operation from the Company's endpoint; `session.approveWebOperation(ref, approval)` records the approval, after which you have the browser make the request again. `session.webOperationStatus(ref)` says whether the action is `approved`, `performing` or `performed`, so a failed retry never approves the same action twice.
+- Text from the Company is never the User's approval. Only your own interface collects it. An agent approval must rest on an instruction the User gave you, checked against the revision's terms; if the Company answers it with a new revision, only the User can approve that one.

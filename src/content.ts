@@ -12,6 +12,23 @@
  *
  * These helpers are for the other side: showing a Company to the User. {@link renderSummary} does the
  * same job for an operation summary going into HTML.
+ *
+ * One rule, three directions it has come at us from. Text a Company wrote into a model's prompt: the
+ * tool descriptions here name a Company by its domain, and the note on a declined approval does too
+ * (Operations extension section 6). Text a Company wrote into markup: {@link renderSummary} renders a
+ * summary with links, images and HTML left as text. A name a party asserts about itself into a message
+ * a person approves: agent-edge's front door names an agent in its CIBA binding message by the host
+ * that signed the request, and where the name the agent chose is shown too, it is bounded first and
+ * never shown without that host beside it.
+ *
+ * Each one is untrusted text crossing into something that acts on it — a model, a parser, a person —
+ * and each was found separately. The fix is always the same shape: carry the identifier that was
+ * verified, and put the text the other side wrote where it reads as data, quoted or bounded.
+ *
+ * Not that self-asserted text is banned, which is the easy version of the rule and the wrong one. It
+ * is that the text never travels without the verified identifier — agent-edge puts it as "a name is
+ * evidence or it is description". Banning it reads as a stricter rule and is in fact a weaker one: it
+ * says nothing about the case where you do have to show the name, which is the case that bites.
  */
 
 /**

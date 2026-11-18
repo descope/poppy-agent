@@ -12,7 +12,6 @@
  * order, print one JSON line per failed step, and keep going.
  */
 import {
-  approvalFor,
   type Company,
   operationFromResponse,
   operatorKeyId,
@@ -20,6 +19,7 @@ import {
   PoppyError,
   type PoppyUser,
   type Session,
+  userApproval,
 } from "../src/index.ts";
 
 type Step =
@@ -65,6 +65,10 @@ const agent = new PoppyAgent({
     kid: context.signing_key.kid,
   },
   redirectUri: context.redirect_uri,
+  // Version 2, not 3, because that is what descope/poppy-conformance's Company lists. The extension
+  // is used only when both sides name the same version (Operations extension section 2), so declaring
+  // 3 here would leave `session.operationsVersion` undefined and the approval steps with nothing to
+  // send. Bump this to "3" once the suite's Company lists version 3.
   extensions: { operations: { version: "2" } },
   // Web Bot Auth, so bot defenses can recognize the operator (spec 5.3). The key is made for this
   // run: a real agent publishes its public key in a key directory and keeps the private one.
@@ -212,7 +216,7 @@ async function run(step: Step): Promise<void> {
       if (operation === undefined) throw new Error("the Company Agent asked for no approval");
       await conversation.send({
         text: "The user approved this.",
-        approval: approvalFor(operation),
+        approval: userApproval(operation, { inputType: "tap" }),
       });
       return;
     }
@@ -224,7 +228,10 @@ async function run(step: Step): Promise<void> {
       await refused.body?.cancel();
       if (operation === undefined) return;
       // The conformance suite stands in for the User, who approves.
-      const approved = await s.fetch(step.url, { ...init, approval: approvalFor(operation) });
+      const approved = await s.fetch(step.url, {
+        ...init,
+        approval: userApproval(operation, { inputType: "tap" }),
+      });
       await approved.body?.cancel();
       return;
     }

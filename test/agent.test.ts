@@ -1,26 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  approvalFor,
+  agentApproval,
   MemoryStore,
   operationFromResponse,
+  outcomeFromResponse,
+  parseOperation,
   PoppyAgent,
   PoppyError,
   PoppyProtocolError,
   renderSummary,
   scopesNeeded,
+  userApproval,
 } from "../src/index.ts";
 import { decodeJwt } from "../src/jose.ts";
 import {
   API,
+  BROWSER_CODE,
   CLIENT_ID,
   CONVERSATIONS,
+  DOMAIN,
   ISSUER,
   MCP,
   MockCompany,
   type MockOptions,
+  OPERATIONS,
+  WEB_OPERATION_REF,
 } from "./mock-company.ts";
 
-async function setup(options: MockOptions = {}, store = new MemoryStore()) {
+async function setup(
+  options: MockOptions = {},
+  store = new MemoryStore(),
+  extensions: Record<string, { version: string }> = { operations: { version: "2" } },
+) {
   const mock = await MockCompany.create(options);
   const agent = new PoppyAgent({
     clientId: CLIENT_ID,
@@ -28,7 +39,7 @@ async function setup(options: MockOptions = {}, store = new MemoryStore()) {
     fetch: mock.fetch,
     store,
     redirectUri: "https://agent.example/callback",
-    extensions: { operations: { version: "2" } },
+    extensions,
   });
   const company = await agent.discover("example.com");
   const user = await agent.user(company, "alice");
@@ -430,31 +441,170 @@ describe("tokens", () => {
 });
 
 describe("Operations extension", () => {
-  it("retries with the User's approval of the exact revision", async () => {
-    const { mock, user } = await setup();
+  const v3 = { operations: { version: "3" } };
+  const exchange = { method: "POST", body: JSON.stringify({ item: "itm_1" }) };
+
+  /** Signs in for exchanges and gets back the operation the Company refuses the request with. */
+  async function refusedExchange(options: MockOptions = {}, extensions = v3) {
+    const { mock, user, company } = await setup(
+      { version: "1.0", ...options },
+      new MemoryStore(),
+      extensions,
+    );
     await signIn(mock, user, "orders:write");
     const session = user.session();
-    const request = { method: "POST", body: JSON.stringify({ item: "itm_1" }) };
-    const refused = await session.fetch(`${API}/v1/exchanges`, request);
+    const refused = await session.fetch(`${API}/v1/exchanges`, exchange);
     const operation = await operationFromResponse(refused);
+    await refused.body?.cancel();
+    if (operation === undefined) throw new Error("the Company asked for no approval");
+    return { mock, user, company, session, operation };
+  }
+
+  it("reads which version of the extension the Company lists, and its endpoint", async () => {
+    // 1.0 lists version 3 with an endpoint and version 2; 0.3 lists only version 2.
+    const { company } = await setup({ version: "1.0" }, new MemoryStore(), v3);
+    expect(company.operations).toEqual({ version: "3", endpoint: OPERATIONS });
+    const { company: old } = await setup({ version: "0.3" });
+    expect(old.operations).toEqual({ version: "2", endpoint: undefined });
+  });
+
+  it("retries with a user approval that carries approver and the optional members", async () => {
+    const { mock, session, operation } = await refusedExchange();
     expect(operation).toMatchObject({
       operationId: "exc_1",
       revision: "r1",
       terms: { price_difference: 70 },
     });
-    if (operation === undefined) return;
     // Links stay text, so the summary can't send the User elsewhere.
     expect(renderSummary(operation.summary)).toBe(
       "<p>Exchange the jacket for <strong>$70</strong> more. [Details](https://evil.test)</p>",
     );
     const approved = await session.fetch(`${API}/v1/exchanges`, {
-      ...request,
-      approval: approvalFor(operation),
+      ...exchange,
+      approval: userApproval(operation, {
+        approvedAt: 1791487260,
+        inputType: "tap",
+        reference: "apr_01JD8ZK3Q9",
+      }),
     });
     expect(approved.status).toBe(201);
-    expect(mock.requests.at(-1)?.headers.get("poppy-approval")).toBe(
-      'operation_id="exc_1", revision="r1"',
+    expect(mock.approvals.at(-1)).toEqual({
+      operation_id: "exc_1",
+      revision: "r1",
+      approver: "user",
+      approved_at: 1791487260,
+      input_type: "tap",
+      reference: "apr_01JD8ZK3Q9",
+    });
+  });
+
+  it("sends an agent approval with no input_type", async () => {
+    const { mock, session, operation } = await refusedExchange();
+    const approved = await session.fetch(`${API}/v1/exchanges`, {
+      ...exchange,
+      approval: agentApproval(operation, { approvedAt: 1791487255 }),
+    });
+    expect(approved.status).toBe(201);
+    expect(mock.approvals.at(-1)).toEqual({
+      operation_id: "exc_1",
+      revision: "r1",
+      approver: "agent",
+      approved_at: 1791487255,
+    });
+  });
+
+  it("sends a Company that lists only version 2 just operation_id and revision", async () => {
+    // The agent declares version 2, so that is the version in use even though 1.0 also lists 3.
+    const { mock, session, operation } = await refusedExchange(
+      {},
+      { operations: { version: "2" } },
     );
+    expect(session.operationsVersion).toBe("2");
+    const approved = await session.fetch(`${API}/v1/exchanges`, {
+      ...exchange,
+      approval: userApproval(operation, { inputType: "tap", reference: "apr_1" }),
+    });
+    expect(approved.status).toBe(201);
+    expect(mock.approvals.at(-1)).toEqual({ operation_id: "exc_1", revision: "r1" });
+    expect(mock.requests.at(-1)?.headers.get("poppy-extensions")).toBe('"operations";v="2"');
+  });
+
+  it("won't send an approval to a Company it shares no version of the extension with", async () => {
+    // The agent declares version 2 and 0.3's document lists version 2, so flip the agent to one the
+    // Company doesn't list at all.
+    const { mock, user } = await setup({ version: "0.3" }, new MemoryStore(), {
+      operations: { version: "3" },
+    });
+    await signIn(mock, user, "orders:write");
+    const session = user.session();
+    expect(session.operationsVersion).toBeUndefined();
+    await expect(
+      session.fetch(`${API}/v1/exchanges`, {
+        ...exchange,
+        approval: {
+          operationId: "exc_1",
+          revision: "r1",
+          approver: "user",
+        },
+      }),
+    ).rejects.toThrow(PoppyProtocolError);
+  });
+
+  it("reports a declined approval as its own outcome, not an error to retry", async () => {
+    const { mock, company, session, operation } = await refusedExchange({
+      declineAgentApprovals: true,
+    });
+    const response = await session.fetch(`${API}/v1/exchanges`, {
+      ...exchange,
+      approval: agentApproval(operation),
+    });
+    const outcome = await outcomeFromResponse(response, company);
+    await response.body?.cancel();
+    expect(outcome).toEqual({
+      type: "approval_declined",
+      decline: {
+        operationId: "exc_1",
+        revision: "r1",
+        reason: "Only the account holder can approve an exchange.",
+        alternative: {
+          instructions: "The account holder can exchange it in the Example app.",
+          references: [{ type: "web", url: `https://${DOMAIN}/exchange` }],
+        },
+      },
+    });
+    // Nothing was performed, so the Company never saw a second approval of that revision.
+    expect(mock.approvals.filter((a) => a?.["revision"] === "r1")).toHaveLength(1);
+  });
+
+  it("gets and approves a website's operation only at the Company's endpoint", async () => {
+    const { mock, user } = await setup({ version: "1.0" }, new MemoryStore(), v3);
+    await signIn(mock, user, "orders:write");
+    const session = user.session();
+    const header = `sid="${session.id}", ref="${WEB_OPERATION_REF}"`;
+    // Only a browser this Session joined gets operations on its website (spec 6, Operations 4).
+    await expect(session.webOperation(header)).rejects.toThrow(PoppyProtocolError);
+    await session.joinBrowser(
+      { open: async () => {}, readCode: async () => BROWSER_CODE, submit: async () => {} },
+      { signedOut: true },
+    );
+    // A header naming another Session is one this Session's browser never received (Operations 8.2).
+    await expect(
+      session.webOperation(`sid="ses_other", ref="${WEB_OPERATION_REF}"`),
+    ).rejects.toThrow(PoppyProtocolError);
+    const operation = await session.webOperation(header);
+    expect(operation).toMatchObject({ operationId: "exc_web", revision: "r1" });
+    expect(mock.requests.at(-1)?.url).toBe(OPERATIONS);
+    const recorded = await session.approveWebOperation(
+      WEB_OPERATION_REF,
+      userApproval(operation, { inputType: "tap" }),
+    );
+    expect(recorded).toEqual({ type: "recorded" });
+    expect(mock.approvals.at(-1)).toMatchObject({ operation_id: "exc_web", approver: "user" });
+    // Approving performs nothing: the browser's request does, and the state says where it is.
+    expect(await session.webOperationStatus(WEB_OPERATION_REF)).toEqual({
+      operationId: "exc_web",
+      status: "approved",
+    });
   });
 });
 
@@ -608,7 +758,11 @@ describe("draft 0.3 updates", () => {
     init: RequestInit,
   ) => Response | undefined | Promise<Response | undefined>;
 
-  async function userAt(mock: MockCompany, handler: Handler = () => undefined) {
+  async function userAt(
+    mock: MockCompany,
+    handler: Handler = () => undefined,
+    extensions: Record<string, { version: string }> = { operations: { version: "2" } },
+  ) {
     const fetchFn = (async (input: string | URL | Request, init: RequestInit = {}) =>
       (await handler(new URL(String(input)), init)) ?? mock.fetch(input, init)) as typeof fetch;
     const agent = new PoppyAgent({
@@ -616,7 +770,7 @@ describe("draft 0.3 updates", () => {
       signingKey: { privateKey: mock.agentKey.privateKey, kid: "k1" },
       fetch: fetchFn,
       redirectUri: "https://agent.example/callback",
-      extensions: { operations: { version: "2" } },
+      extensions,
     });
     return agent.user(await agent.discover("example.com"), "alice");
   }
@@ -779,7 +933,11 @@ describe("draft 0.3 updates", () => {
     expect(received.message.disclosures).toEqual([{ text: "Contains peanuts." }]);
     expect(received.message.operation?.operationId).toBe("exc_1");
 
-    await conversation.send({ approval: approvalFor(received.message.operation!) });
+    // This Company's document is 0.3, which lists Operations version 2, so the approval is written
+    // for version 2: operation_id and revision, and none of version 3's members.
+    await conversation.send({
+      approval: userApproval(received.message.operation!, { inputType: "tap" }),
+    });
     expect(bodies[1]).toEqual({
       message: {
         id: expect.any(String),
@@ -797,14 +955,131 @@ describe("draft 0.3 updates", () => {
     await expect(conversation.openDirect(undefined)).rejects.toThrow(PoppyProtocolError);
   });
 
-  it("sends an approval in a message only to a Company that lists Operations version 2", async () => {
+  it("writes a message approval for the version the Session negotiated, not the Company's newest", async () => {
+    // 1.0 lists Operations 3 and 2. This agent declares 2, so `Poppy-Extensions` says v="2" and the
+    // approval in the message body must say the same: version 3's members would be content for a
+    // version the request never declared (spec 8.4, Operations section 2).
+    const mock = await MockCompany.create({ version: "1.0" });
+    const user = await userAt(mock, () => undefined, { operations: { version: "2" } });
+    const session = user.session();
+    expect(session.operationsVersion).toBe("2");
+    await session.conversations().start({
+      text: "Exchange it",
+      approval: userApproval(
+        parseOperation({
+          operation_id: "exc_1",
+          revision: "r1",
+          expires_at: "2099-01-01T00:00:00Z",
+        }),
+        { inputType: "tap", reference: "apr_1" },
+      ),
+    });
+    expect(mock.messageApprovals).toEqual([{ operation_id: "exc_1", revision: "r1" }]);
+  });
+
+  it("won't put an approval in a message when the agent declares no Operations extension", async () => {
+    // The Company lists the extension, but this agent never declared it, so the Company was never
+    // told this agent uses it and must not be sent its content (Operations section 2).
+    const mock = await MockCompany.create({ version: "1.0" });
+    const user = await userAt(mock, () => undefined, {});
+    const session = user.session();
+    expect(session.operationsVersion).toBeUndefined();
+    await expect(
+      session.conversations().start({
+        text: "Exchange it",
+        approval: { operationId: "exc_1", revision: "r1", approver: "user" },
+      }),
+    ).rejects.toThrow(PoppyProtocolError);
+    expect(mock.messageApprovals).toEqual([]);
+  });
+
+  it("sends an approval in a message only to a Company that lists the Operations extension", async () => {
     const mock = await MockCompany.create({ poppy: (doc) => ({ ...doc, extensions: {} }) });
     const user = await userAt(mock, (url) =>
       url.href.startsWith(CONVERSATIONS) ? Response.json({}, { status: 500 }) : undefined,
     );
     const conversation = user.session().conversations().resume("cnv_1");
     await expect(
-      conversation.send({ approval: { operationId: "exc_1", revision: "r1" } }),
+      conversation.send({
+        approval: { operationId: "exc_1", revision: "r1", approver: "user" },
+      }),
     ).rejects.toThrow(PoppyProtocolError);
+  });
+
+  it("writes a version 3 approval for a Company that lists version 3, and reads its decline", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const declined = {
+      id: "msg_2",
+      role: "company",
+      author: { type: "agent" },
+      text: "I couldn't do that.",
+      extensions: {
+        operations: {
+          declined: {
+            operation_id: "exc_1",
+            revision: "r1",
+            reason: "Only the account holder can approve an exchange.",
+          },
+        },
+      },
+    };
+    const user = await userAt(
+      await MockCompany.create({ version: "1.0" }),
+      (url, init) => {
+        if (!url.href.startsWith(CONVERSATIONS)) return undefined;
+        bodies.push(JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>);
+        return Response.json(
+          {
+            id: "req_1",
+            conversation_id: "cnv_1",
+            events: [{ id: "evt_2", type: "message", created_at: "t", message: declined }],
+            cursor: "evt_2",
+            has_more: false,
+            handoff: "none",
+            responder: "agent",
+            closed: false,
+          },
+          { status: 201 },
+        );
+      },
+      // This agent declares version 3, which the 1.0 document lists, so that is what it writes.
+      { operations: { version: "3" } },
+    );
+    const { conversation, update } = await user
+      .session()
+      .conversations()
+      .start({ text: "Exchange it." });
+    // A decline arrives as its own content, told apart from an operation (Operations section 6).
+    const event = update.events[0];
+    if (event?.type !== "message") throw new Error("expected a message");
+    expect(event.message.operation).toBeUndefined();
+    expect(event.message.declined).toEqual({
+      operationId: "exc_1",
+      revision: "r1",
+      reason: "Only the account holder can approve an exchange.",
+      alternative: undefined,
+    });
+
+    await conversation.send({
+      approval: {
+        operationId: "exc_1",
+        revision: "r1",
+        approver: "agent",
+        approvedAt: 1791487255,
+        reference: "apr_1",
+      },
+    });
+    const sent = bodies[1]?.["message"] as Record<string, unknown> | undefined;
+    expect(sent?.["extensions"]).toEqual({
+      operations: {
+        approval: {
+          operation_id: "exc_1",
+          revision: "r1",
+          approver: "agent",
+          approved_at: 1791487255,
+          reference: "apr_1",
+        },
+      },
+    });
   });
 });

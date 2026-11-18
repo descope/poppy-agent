@@ -128,6 +128,24 @@ export interface UcpExtensionInfo {
   ask: boolean;
 }
 
+/**
+ * How the Company supports the Operations extension (Operations extension section 2).
+ *
+ * `version` is the newest of the versions it lists that this SDK implements, so behaviour keys off it:
+ * version 3 approvals carry `approver` and may carry `approved_at`, `input_type` and `reference`, and a
+ * version 2 Company is sent only `operation_id` and `revision`.
+ */
+export interface OperationsExtensionInfo {
+  version: "2" | "3";
+  /**
+   * `endpoint` of the version 3 entry: where the agent gets operations its browser's requests returned
+   * and sends their approvals (Operations sections 4, 6). Undefined when the Company returns no
+   * operations on its website, and on version 2, which had no website flow. A Company that lists it
+   * must also list {@link Company.browserSessionEndpoint}, since only a joined browser gets operations.
+   */
+  endpoint: string | undefined;
+}
+
 /** An extension entry from `poppy.json` (spec 3.3), with its own fields kept as published. */
 export interface ExtensionEntry {
   version: string;
@@ -223,6 +241,8 @@ export interface Company {
   skills: readonly Skill[];
   /** Set when the Company lists the UCP extension, version 1. */
   ucp: UcpExtensionInfo | undefined;
+  /** Set when the Company lists the Operations extension at a version this SDK implements. */
+  operations: OperationsExtensionInfo | undefined;
 }
 
 export interface DiscoverOptions {
@@ -564,6 +584,26 @@ function parseUcp(
   return { profileUrl, ask };
 }
 
+/**
+ * Reads the Company's `operations` entries (Operations extension section 2), newest version first, so
+ * the agent can tell a version 3 Company from a version 2 one and find its website `endpoint`.
+ */
+function parseOperations(
+  extensions: Record<string, ExtensionEntry[]>,
+): OperationsExtensionInfo | undefined {
+  for (const version of ["3", "2"] as const) {
+    const entry = extensionEntry(extensions, "operations", version);
+    if (entry === undefined) continue;
+    // Version 2 had no website flow, so its entry never names an endpoint for one.
+    const endpoint =
+      version === "3" && typeof entry["endpoint"] === "string"
+        ? httpsUrl(entry["endpoint"], "extensions.operations.endpoint").href
+        : undefined;
+    return { version, endpoint };
+  }
+  return undefined;
+}
+
 function optionalUrl(container: unknown, key: string, what: string): string | undefined {
   if (!isObject(container) || container[key] === undefined) return undefined;
   return httpsUrl(container[key], what).href;
@@ -723,6 +763,7 @@ interface ParsedDocument {
   excludedTasksUrl: string | undefined;
   skills: Skill[];
   ucp: UcpExtensionInfo | undefined;
+  operations: OperationsExtensionInfo | undefined;
 }
 
 /**
@@ -820,6 +861,7 @@ function parseDocument(
     excludedTasksUrl,
     skills: version === "0.3" ? parseSkillIndex(doc["skill_index"], documentUrl) : [],
     ucp: parseUcp(extensions, doc["agent"], domain),
+    operations: parseOperations(extensions),
   };
 }
 
@@ -944,6 +986,7 @@ export async function discover(website: string, options: DiscoverOptions = {}): 
     extensions: chosen.extensions,
     skills: chosen.skills,
     ucp: chosen.ucp,
+    operations: chosen.operations,
   };
 }
 

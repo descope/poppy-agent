@@ -13,7 +13,7 @@ export interface ClientMetadataInput {
    * loopback redirect URIs for an app on the User's computer (RFC 8252 section 7.3).
    */
   redirectUris?: readonly string[];
-  /** Extensions this agent supports, by name (spec 3.3), such as `{ operations: { version: "2" } }`. */
+  /** Extensions this agent supports, by name (spec 3.3), such as `{ operations: { version: "3" } }`. */
   extensions?: Readonly<Record<string, { version: string }>>;
 }
 

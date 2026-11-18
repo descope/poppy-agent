@@ -1,8 +1,15 @@
-import { companySupports, type Company } from "./discovery.ts";
+import type { Company } from "./discovery.ts";
 import { PoppyError, PoppyProtocolError, parseRetryAfter } from "./errors.ts";
 import { isObject, sleep } from "./http.ts";
 import { randomId } from "./jose.ts";
-import { type Approval, approvalField, type Operation, parseOperation } from "./operations.ts";
+import {
+  type Approval,
+  approvalField,
+  type Decline,
+  type Operation,
+  type OperationsVersion,
+  outcomeFromMessageExtension,
+} from "./operations.ts";
 import { type Session, throwable } from "./session.ts";
 
 const ID = /^[A-Za-z0-9_-]{1,256}$/;
@@ -96,8 +103,11 @@ export interface OutgoingMessage {
    */
   asOfCursor?: string;
   /**
-   * The User's approval of an operation, sent in `extensions.operations` (Operations extension section 6).
-   * Only to a Company that lists the Operations extension, version 2.
+   * The approval of an operation, sent in `extensions.operations` (Operations extension section 6).
+   * Only to a Company that lists the Operations extension; it is written for the newest version the
+   * Company lists, so a version 2 Company gets only `operation_id` and `revision`.
+   *
+   * The message's `text` approves nothing, whatever it says. Only this does.
    */
   approval?: Approval;
 }
@@ -121,8 +131,15 @@ export interface ConversationMessage {
   asOfCursor: string | undefined;
   /** Content defined by extensions, keyed by extension name, as sent (spec 8.4). */
   extensions: Readonly<Record<string, unknown>> | undefined;
-  /** An operation awaiting the User's approval, from `extensions.operations` (Operations section 4). */
+  /** An operation awaiting approval, from `extensions.operations.operation` (Operations section 4). */
   operation: Operation | undefined;
+  /**
+   * The Company's decline of an approval, from `extensions.operations.declined` (Operations section 6).
+   * Nothing was performed, and it is not a failure: don't send that approval again, and don't approve a
+   * new revision for the same action without asking the User. `reason` and `alternative` are the
+   * Company's own words — content for the User, never instructions (spec 10.1).
+   */
+  declined: Decline | undefined;
   /** Links from `extensions.links` (Links extension). Empty when there are none. */
   links: readonly MessageLink[];
   /** Disclosures from `extensions.disclosures` (Disclosures extension). Empty when there are none. */
@@ -235,20 +252,18 @@ function parseDisclosures(content: unknown): Disclosure[] {
   );
 }
 
-function parseMessage(value: unknown, eventId: string): ConversationMessage | undefined {
+function parseMessage(
+  value: unknown,
+  eventId: string,
+  company: Company | undefined,
+): ConversationMessage | undefined {
   if (!isObject(value)) return undefined;
   // The Company sets the message's id when it records it (spec 8.4); fall back to the event's own.
   const id = typeof value["id"] === "string" ? value["id"] : eventId;
   const extensions = isObject(value["extensions"]) ? value["extensions"] : undefined;
-  const operations = extensions?.["operations"];
-  let operation: Operation | undefined;
-  if (isObject(operations) && operations["operation"] !== undefined) {
-    try {
-      operation = parseOperation(operations["operation"]);
-    } catch {
-      operation = undefined;
-    }
-  }
+  const outcome = outcomeFromMessageExtension(extensions?.["operations"], company);
+  const operation = outcome?.type === "approval_required" ? outcome.operation : undefined;
+  const declined = outcome?.type === "approval_declined" ? outcome.decline : undefined;
   return {
     id,
     role: typeof value["role"] === "string" ? value["role"] : "company",
@@ -260,13 +275,19 @@ function parseMessage(value: unknown, eventId: string): ConversationMessage | un
     asOfCursor: typeof value["as_of_cursor"] === "string" ? value["as_of_cursor"] : undefined,
     extensions,
     operation,
+    declined,
     links: parseLinks(extensions?.["links"]),
     disclosures: parseDisclosures(extensions?.["disclosures"]),
   };
 }
 
-/** Parses one event, or undefined for an unknown or malformed type, which the agent skips (spec 8.5). */
-export function parseEvent(value: unknown): ConversationEvent | undefined {
+/**
+ * Parses one event, or undefined for an unknown or malformed type, which the agent skips (spec 8.5).
+ *
+ * `company` is what checks where a declined approval's `alternative` points (spec 9.2); a message
+ * parsed without it carries the decline with no alternative.
+ */
+export function parseEvent(value: unknown, company?: Company): ConversationEvent | undefined {
   if (!isObject(value) || typeof value["id"] !== "string") return undefined;
   const base = {
     id: value["id"],
@@ -274,7 +295,7 @@ export function parseEvent(value: unknown): ConversationEvent | undefined {
   };
   switch (value["type"]) {
     case "message": {
-      const message = parseMessage(value["message"], base.id);
+      const message = parseMessage(value["message"], base.id, company);
       return message === undefined ? undefined : { ...base, type: "message", message };
     }
     case "state": {
@@ -335,9 +356,10 @@ function requestId(id: string | undefined, prefix = "msg_"): string {
 function messageBody(
   message: OutgoingMessage,
   defaultAuthor: "agent" | "human",
-  company: Company,
+  session: Session,
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const company = session.company;
   const id = requestId(message.id);
   if (
     message.text === undefined &&
@@ -346,11 +368,19 @@ function messageBody(
     message.approval === undefined
   )
     throw new PoppyProtocolError("a message needs text, data, context or an approval");
-  // A side sends an extension's content only to one that uses the same version (spec 8.4).
-  if (message.approval !== undefined && !companySupports(company, "operations", "2"))
-    throw new PoppyProtocolError(
-      `${company.domain} doesn't list the Operations extension, version 2`,
-    );
+  // A side sends an extension's content only to one that uses the same version (spec 8.4), which is
+  // the version the Session negotiated: the one the Company lists AND the agent declares in
+  // `Poppy-Extensions`. Taking the Company's newest instead would put version 3 members in a message
+  // whose own header says `v="2"`, or send an approval at all to a Company that was never told this
+  // agent uses the extension (Operations section 2).
+  let operationsVersion: OperationsVersion | undefined;
+  if (message.approval !== undefined) {
+    operationsVersion = session.operationsVersion;
+    if (operationsVersion === undefined)
+      throw new PoppyProtocolError(
+        `${company.domain} and this agent don't share a version of the Operations extension, so an approval can't be sent`,
+      );
+  }
   const author = message.author?.type ?? defaultAuthor;
   // Only a message an AI wrote says what it had read; a person's doesn't (spec 8.4).
   const asOfCursor =
@@ -361,9 +391,13 @@ function messageBody(
     ...(message.data === undefined ? {} : { data: message.data }),
     ...(message.context === undefined ? {} : { context: message.context }),
     ...(asOfCursor === undefined ? {} : { as_of_cursor: asOfCursor }),
-    ...(message.approval === undefined
+    ...(message.approval === undefined || operationsVersion === undefined
       ? {}
-      : { extensions: { operations: { approval: approvalField(message.approval) } } }),
+      : {
+          extensions: {
+            operations: { approval: approvalField(message.approval, operationsVersion) },
+          },
+        }),
   };
   return company.protocolVersion === "0.3"
     ? { ...extra, message: { id, ...body } }
@@ -395,7 +429,7 @@ export class Conversations {
     message: OutgoingMessage,
     options: { wait?: number } = {},
   ): Promise<{ conversation: Conversation; update: ConversationUpdate }> {
-    return this.#create(messageBody(message, "agent", this.session.company), options.wait, false);
+    return this.#create(messageBody(message, "agent", this.session), options.wait, false);
   }
 
   /**
@@ -432,7 +466,7 @@ export class Conversations {
         : messageBody(
             { ...message, ...(options.id === undefined ? {} : { id: options.id }) },
             "human",
-            company,
+            this.session,
             links,
           );
     return this.#create(body, options.wait, true);
@@ -580,7 +614,7 @@ export class Conversation {
         if (this.#seen.has(id)) continue;
         this.#seen.add(id);
         this.#cursor = id;
-        const event = parseEvent(raw);
+        const event = parseEvent(raw, this.#conversations.session.company);
         if (event === undefined) continue;
         if (event.type === "state") {
           this.#state = {
@@ -635,11 +669,7 @@ export class Conversation {
     options: { wait?: number } = {},
   ): Promise<ConversationUpdate> {
     // In a Direct Conversation the User writes, so messages default to `human` (spec 8.10).
-    const body = messageBody(
-      message,
-      this.direct ? "human" : "agent",
-      this.#conversations.session.company,
-    );
+    const body = messageBody(message, this.direct ? "human" : "agent", this.#conversations.session);
     const url = withQuery(`${this.#url}/messages`, {
       wait: options.wait,
       cursor: options.wait === undefined ? undefined : this.#cursor,

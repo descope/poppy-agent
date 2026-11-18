@@ -1,18 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentApproval,
+  approvalField,
   approvalHeader,
   approvalMeta,
   clientMetadata,
   companyLabel,
   isOperationExpired,
   jwks,
+  newApprovalReference,
   operationFromToolResult,
   operatorKeyId,
+  outcomeFromToolResult,
   parseChallenges,
+  parseDecline,
   parseEvent,
+  parseOperation,
+  parseOperationHeader,
+  parseRfc3339,
   plainText,
   PoppyProtocolError,
   renderSummary,
+  userApproval,
 } from "../src/index.ts";
 import { isPrivateHost, withoutTrailingSlashes } from "../src/http.ts";
 import { signOperator } from "../src/operator.ts";
@@ -66,20 +75,100 @@ describe("operations", () => {
     expect(renderSummary("1. First\n2. Second")).toBe("<ol><li>First</li><li>Second</li></ol>");
   });
 
-  it("serializes approvals for APIs and MCP", () => {
-    const approval = { operationId: "exc_5Rt2", revision: "1791487200-k3Jd9Qx2mW8v" };
-    expect(approvalHeader(approval)).toBe(
+  const exchange = parseOperation({
+    operation_id: "exc_5Rt2",
+    revision: "1791487200-k3Jd9Qx2mW8v",
+    summary: "Exchange the jacket.",
+    terms: { price_difference: 70 },
+    expires_at: "2099-10-08T12:20:00-07:00",
+  });
+
+  it("builds a user approval with every member version 3 allows", () => {
+    const approval = userApproval(exchange, {
+      approvedAt: 1791487260,
+      inputType: "tap",
+      reference: "apr_01JD8ZK3Q9",
+    });
+    expect(approval).toEqual({
+      operationId: "exc_5Rt2",
+      revision: "1791487200-k3Jd9Qx2mW8v",
+      approver: "user",
+      approvedAt: 1791487260,
+      inputType: "tap",
+      reference: "apr_01JD8ZK3Q9",
+    });
+    expect(approvalHeader(approval, "3")).toBe(
+      'operation_id="exc_5Rt2", revision="1791487200-k3Jd9Qx2mW8v", approver="user", ' +
+        'approved_at=1791487260, input_type="tap", reference="apr_01JD8ZK3Q9"',
+    );
+    expect(approvalMeta(approval, "3")).toEqual({
+      "personalagentprotocol.org/approval": {
+        operation_id: "exc_5Rt2",
+        revision: "1791487200-k3Jd9Qx2mW8v",
+        approver: "user",
+        approved_at: 1791487260,
+        input_type: "tap",
+        reference: "apr_01JD8ZK3Q9",
+      },
+    });
+  });
+
+  it("sends an agent approval without input_type, and refuses one that carries it", () => {
+    const approval = agentApproval(exchange, { approvedAt: 1791487255 });
+    expect(approvalHeader(approval, "3")).toBe(
+      'operation_id="exc_5Rt2", revision="1791487200-k3Jd9Qx2mW8v", approver="agent", ' +
+        "approved_at=1791487255",
+    );
+    // Section 6: input_type MUST NOT be sent with an agent approval.
+    expect(() =>
+      approvalHeader(
+        { ...approval, inputType: "tap" } as unknown as Parameters<typeof approvalHeader>[0],
+        "3",
+      ),
+    ).toThrow(PoppyProtocolError);
+  });
+
+  it("sends a version 2 Company only the members version 2 defined", () => {
+    const approval = userApproval(exchange, { approvedAt: 1791487260, inputType: "tap" });
+    expect(approvalHeader(approval, "2")).toBe(
       'operation_id="exc_5Rt2", revision="1791487200-k3Jd9Qx2mW8v"',
     );
-    expect(approvalMeta(approval)).toEqual({
+    expect(approvalField(approval, "2")).toEqual({
+      operation_id: "exc_5Rt2",
+      revision: "1791487200-k3Jd9Qx2mW8v",
+    });
+    // Version 3 of the same approval is the one that carries approver.
+    expect(approvalField(approval, "3")).toMatchObject({ approver: "user" });
+  });
+
+  it("refuses to write an approval when no version of the extension is shared", () => {
+    // `session.operationsVersion` is undefined when the Company listed no version this agent also
+    // declared. Section 2: the extension is in use only when both sides name the version, so there
+    // is nothing to write. Defaulting to the newest would put approver, approved_at, input_type and
+    // reference in front of a Company that never agreed to read them.
+    const approval = userApproval(exchange, { approvedAt: 1791487260, inputType: "tap" });
+    expect(() => approvalHeader(approval, undefined)).toThrow(PoppyProtocolError);
+    expect(() => approvalMeta(approval, undefined)).toThrow(PoppyProtocolError);
+    expect(() => approvalField(approval, undefined)).toThrow(PoppyProtocolError);
+    // A version 2 Company gets the two members version 2 defined, not a version 3 approval.
+    expect(approvalMeta(approval, "2")).toEqual({
       "personalagentprotocol.org/approval": {
         operation_id: "exc_5Rt2",
         revision: "1791487200-k3Jd9Qx2mW8v",
       },
     });
-    expect(() => approvalHeader({ operationId: 'a", b="c', revision: "r" })).toThrow(
-      PoppyProtocolError,
-    );
+  });
+
+  it("refuses approval members a Company must never be sent", () => {
+    expect(() =>
+      approvalHeader({ operationId: 'a", b="c', revision: "r", approver: "user" }, "3"),
+    ).toThrow(PoppyProtocolError);
+    expect(() =>
+      approvalHeader({ ...exchange, approver: "user", reference: "has spaces" } as never, "3"),
+    ).toThrow(PoppyProtocolError);
+    expect(() => userApproval(exchange, { approvedAt: 1.5 })).toThrow(PoppyProtocolError);
+    // Random by construction, so the same reference never reaches two Companies (section 6).
+    expect(newApprovalReference()).not.toBe(newApprovalReference());
   });
 
   it("reads an operation from an MCP tool error", () => {
@@ -98,6 +187,111 @@ describe("operations", () => {
     expect(operation?.operationId).toBe("exc_1");
     expect(operation !== undefined && isOperationExpired(operation)).toBe(true);
     expect(operationFromToolResult({ isError: false })).toBeUndefined();
+  });
+
+  it("accepts an operation with no summary, which section 3 makes optional", () => {
+    const operation = parseOperation({
+      operation_id: "exc_1",
+      revision: "r1",
+      terms: { amount: 1 },
+      expires_at: "2099-01-01T00:00:00Z",
+    });
+    expect(operation.summary).toBeUndefined();
+    expect(renderSummary(operation.summary)).toBe("");
+  });
+
+  it("refuses an expires_at that names a day the calendar doesn't have", () => {
+    // Date.parse("2026-02-30T00:00:00Z") rolls over to 2 March rather than failing, which would give
+    // the operation two more days of validity than the Company wrote.
+    expect(Number.isNaN(Date.parse("2026-02-30T00:00:00Z"))).toBe(false);
+    for (const expires of [
+      "2026-02-30T00:00:00Z",
+      "2026-13-01T00:00:00Z",
+      "2026-04-31T00:00:00Z",
+      "2025-02-29T00:00:00Z",
+      "2026-01-01T24:00:00Z",
+      "2026-01-01T00:60:00Z",
+      "2026-01-01T00:00:00+24:00",
+      "2026-01-01",
+      "not a date",
+    ]) {
+      expect(() =>
+        parseOperation({ operation_id: "o", revision: "r", expires_at: expires }),
+      ).toThrow(PoppyProtocolError);
+    }
+    // A leap year keeps 29 February, and an offset is applied rather than ignored.
+    expect(parseRfc3339("2024-02-29T00:00:00Z")).toBe(Date.UTC(2024, 1, 29));
+    expect(parseRfc3339("2026-10-08T12:20:00-07:00")).toBe(Date.UTC(2026, 9, 8, 19, 20));
+    expect(parseRfc3339("2026-12-31T23:59:60Z")).toBe(Date.UTC(2026, 11, 31, 23, 59, 59));
+  });
+
+  it("truncates a fractional second rather than rounding it up into the next second", () => {
+    // Number(".9999999999999999999") rounds to 1, which would carry into the next second and leave
+    // the operation unexpired for a millisecond past the time the Company wrote.
+    expect(parseRfc3339("2026-01-01T00:00:00.9999999999999999999Z")).toBe(
+      Date.UTC(2026, 0, 1, 0, 0, 0, 999),
+    );
+    expect(parseRfc3339("2026-01-01T00:00:00.5Z")).toBe(Date.UTC(2026, 0, 1, 0, 0, 0, 500));
+    expect(parseRfc3339("2026-01-01T00:00:00.25Z")).toBe(Date.UTC(2026, 0, 1, 0, 0, 0, 250));
+    expect(parseRfc3339("2026-01-01T00:00:00.0009Z")).toBe(Date.UTC(2026, 0, 1, 0, 0, 0, 0));
+    const operation = parseOperation({
+      operation_id: "exc_1",
+      revision: "r1",
+      expires_at: "2026-01-01T00:00:00.9999999999999999999Z",
+    });
+    // The millisecond after the truncated expiry is expired, not still valid.
+    expect(isOperationExpired(operation, Date.UTC(2026, 0, 1, 0, 0, 1))).toBe(true);
+  });
+
+  it("reads a Poppy-Operation header, and only a well-formed one", () => {
+    expect(
+      parseOperationHeader('sid="ses_Hq3vT8nW2kLm9xRb", ref="exc_5Rt2.1791487200.k3Jd9Qx2mW8v"'),
+    ).toEqual({ sid: "ses_Hq3vT8nW2kLm9xRb", ref: "exc_5Rt2.1791487200.k3Jd9Qx2mW8v" });
+    for (const header of [
+      'sid="ses_1"',
+      'ref="exc_1"',
+      "sid=ses_1, ref=exc_1",
+      'sid="ses_1", ref="has spaces"',
+      'sid="ses 1", ref="exc_1"',
+      `sid="ses_1", ref="${"a".repeat(2049)}"`,
+      null,
+      undefined,
+    ]) {
+      expect(parseOperationHeader(header)).toBeUndefined();
+    }
+  });
+
+  it("reads a decline and keeps it apart from an operation", () => {
+    const declined = parseDecline(
+      {
+        error: "approval_declined",
+        operation_id: "cls_2Wq8",
+        revision: "1791487200-p9Lm3Rt6Vx1c",
+        reason: "Only the account holder can close this account.",
+        alternative: { instructions: "Close it in the Example app." },
+      },
+      undefined,
+    );
+    expect(declined).toEqual({
+      operationId: "cls_2Wq8",
+      revision: "1791487200-p9Lm3Rt6Vx1c",
+      reason: "Only the account holder can close this account.",
+      alternative: undefined,
+    });
+    expect(
+      outcomeFromToolResult(
+        {
+          isError: true,
+          structuredContent: {
+            error: "approval_declined",
+            operation_id: "cls_2Wq8",
+            revision: "r1",
+          },
+        },
+        undefined as never,
+      ),
+    ).toMatchObject({ type: "approval_declined" });
+    expect(() => parseDecline({ operation_id: "cls_2Wq8" }, undefined)).toThrow(PoppyProtocolError);
   });
 });
 
