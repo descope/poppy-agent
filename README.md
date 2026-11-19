@@ -154,6 +154,7 @@ For a runnable script, see [`examples/quickstart.ts`](examples/quickstart.ts).
 - [Build your first Personal Agent](docs/get-started/first-agent.md): a step-by-step tutorial
 - [Tools for models](docs/tools.md): give a model a Company's APIs and Company Agent as tools, with the AI SDK, Anthropic, OpenAI or MCP
 - [UCP](docs/ucp.md): commerce with the Universal Commerce Protocol, next to Poppy
+- [Testing your site](docs/testing-your-site.md): for a Company — what to publish, how to let an agent sign in for your web functions, and two commands that tell you whether it works
 - [Conformance](https://github.com/descope/poppy-conformance): test any Personal Agent, in any language, against the spec's rules, with a CLI, baselines and a GitHub Action — and check a Company's discovery chain
 - [How it works](docs/how-it-works.md): discovery, Sessions, sign-in, requests, browser join, conversations and operations, with sequence diagrams
 - [Security and storage](docs/security.md): what the SDK protects, what it stores, and what you must protect
