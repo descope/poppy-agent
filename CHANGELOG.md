@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/descope/poppy-agent/compare/poppy-agent-v1.0.0...poppy-agent-v2.0.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* `Approval` now requires `approver`, so build approvals with `userApproval()` / `agentApproval()` rather than by hand, and `approvalFor(operation)` now takes a second argument saying who approved. `Operation.summary` is `string | undefined`, since section 3 makes it optional, and `Operation` gained `expiresAtMs`. `poppyTools`' `requestApproval` may return an approver rather than only a boolean, and its results say `approved_by: "user" | "agent"` in place of `approved_by_user`. `parseEvent()` takes an optional `Company`.
+
+### Features
+
+* version 3 of the Operations extension ([#37](https://github.com/descope/poppy-agent/issues/37)) ([ed25c10](https://github.com/descope/poppy-agent/commit/ed25c10a447d8763ebbbaba1c3a08eba1cf0fa35))
+
+
+### Bug Fixes
+
+* hold pnpm at 11, which corepack can actually launch ([#30](https://github.com/descope/poppy-agent/issues/30)) ([ae9c250](https://github.com/descope/poppy-agent/commit/ae9c25014af8d10992daa59b6ba215f803d49d2a))
+* point the package and its instructions at poppy-agent ([#42](https://github.com/descope/poppy-agent/issues/42)) ([0044fdb](https://github.com/descope/poppy-agent/commit/0044fdb719f27b10e27e4dfd13d82bd75f9afbab))
+* **tools:** keep a message whose role a later version added ([#41](https://github.com/descope/poppy-agent/issues/41)) ([97ee674](https://github.com/descope/poppy-agent/commit/97ee6746616bfec9f9b03451e8568337eb9c7288))
+* **tools:** name a Company by the domain that was verified ([#34](https://github.com/descope/poppy-agent/issues/34)) ([2e77761](https://github.com/descope/poppy-agent/commit/2e777615a5d7fa5a4b9cd05a8028417d5e20efa7))
+
 ## 1.0.0 (2026-11-17)
 
 
