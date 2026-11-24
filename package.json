@@ -49,7 +49,7 @@
   "devDependencies": {
     "@types/node": "24.19.2",
     "@vitest/coverage-v8": "5.1.0",
-    "ai": "7.0.161",
+    "ai": "7.0.162",
     "oxfmt": "0.75.0",
     "oxlint": "1.90.0",
     "typescript": "7.0.2",
