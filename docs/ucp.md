@@ -110,7 +110,20 @@ await user.startDirectSignIn({ scope: ucpIdentityScopes(negotiation) });
 
 `ucpIdentityScopes()` returns the scopes from the profile's identity linking `config.scopes` for the capabilities you negotiated. The Company lists them in `scopes_supported`.
 
-UCP's challenges work like any API's. A 401 `identity_required` means the operation needs an account, and a 403 `insufficient_scope` names the full set of scopes it needs. For `insufficient_scope`, UCP asks for only the missing scopes, so you would pass `replaceScopes: true` with just those. The Company keeps the scopes the User already granted. A Company that sets `auth.disabled` offers no sign-in, so its UCP requests stay signed out.
+UCP's challenges work like any API's, and the client reads them. A 401 `identity_required` means the operation needs an account at all; a 403 `insufficient_scope` means the Session has one but not these scopes. Either way the `UcpError` carries `scope`, the scopes the challenge named, which is the only place they are written (spec 7):
+
+```typescript
+try {
+  await ucp.completeCheckout(checkout.id, { payment });
+} catch (error) {
+  if (error instanceof UcpError && error.scope !== undefined)
+    await user.startDirectSignIn({ scope: error.scope });
+}
+```
+
+Leave `replaceScopes` alone when you do this. By default the SDK asks for the scopes the User has already granted as well as the new ones, which is what you want: `replaceScopes: true` sends exactly the scopes you pass and nothing else, and the new refresh token replaces the old one (spec 4.7), so asking that way for only what the challenge named drops everything granted before it.
+
+A Company that sets `auth.disabled` offers no sign-in, so its UCP requests stay signed out.
 
 ## MCP
 

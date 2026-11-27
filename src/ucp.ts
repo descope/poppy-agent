@@ -1,3 +1,4 @@
+import { authChallenge, scopesNeeded } from "./challenge.ts";
 import type { Company } from "./discovery.ts";
 import { PoppyError, PoppyProtocolError, parseRetryAfter } from "./errors.ts";
 import {
@@ -345,12 +346,15 @@ export class UcpError extends PoppyError {
       continueUrl?: string | undefined;
       description?: string | undefined;
       retryAfter?: number | undefined;
+      /** The scopes the request needs, from the `WWW-Authenticate` challenge (spec 7). */
+      scope?: string | undefined;
     },
   ) {
     super(code, {
       status: options.status,
       description: options.description,
       retryAfter: options.retryAfter,
+      scope: options.scope,
     });
     this.messages = options.messages ?? [];
     this.continueUrl = options.continueUrl;
@@ -564,9 +568,15 @@ export async function parseUcpResponse(response: Response): Promise<Record<strin
   const ucpStatus = isObject(body) && isObject(body["ucp"]) ? body["ucp"]["status"] : undefined;
   if (!response.ok || ucpStatus === "error") {
     const error = messages.find((m) => m.type === "error") ?? messages[0];
+    // The scopes an operation needs are written in the challenge and nowhere else (spec 7). Without
+    // them the agent knows only that it was refused, not what to ask the User to grant. UCP's own
+    // vocabulary still wins the code, since that is the business's to choose; the challenge's error
+    // is the fallback, so a header-only refusal is something a caller can branch on rather than
+    // `http_403`.
     const code =
       (isObject(body) && typeof body["code"] === "string" ? body["code"] : undefined) ??
       error?.code ??
+      authChallenge(response)?.error ??
       (response.status === 429 ? "rate_limited" : `http_${response.status}`);
     throw new UcpError(code, {
       status: response.status,
@@ -577,6 +587,7 @@ export async function parseUcpResponse(response: Response): Promise<Record<strin
         error?.content
       )?.slice(0, 200),
       retryAfter,
+      scope: scopesNeeded(response),
     });
   }
   if (!isObject(body)) throw new PoppyProtocolError("UCP response must be a JSON object");

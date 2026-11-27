@@ -385,6 +385,90 @@ describe("UCP requests", () => {
   });
 });
 
+describe("a UCP operation that needs more scopes", () => {
+  const negotiation = {
+    business: {
+      url: "https://shop.example/.well-known/ucp",
+      version: "2026-08-25",
+      supportedVersions: {},
+      services: {},
+      capabilities: {},
+      paymentHandlers: {},
+      keys: [],
+    },
+    version: "2026-08-25",
+    capabilities: {},
+    restEndpoint: "https://shop.example/ucp",
+    mcpEndpoint: undefined,
+  };
+
+  /** A business that answers every request the same way. */
+  function clientFor(answer: () => Response): UcpClient {
+    return new UcpClient({
+      negotiation,
+      profileUrl: PROFILE_URL,
+      fetch: (async () => answer()) as typeof fetch,
+    });
+  }
+
+  it("names the scopes the challenge asks for", async () => {
+    // Spec 7: the challenge is the only place the scopes an operation needs are written. Without
+    // them the agent knows the request was refused but not what to ask the User to grant.
+    const client = clientFor(() =>
+      Response.json(
+        { code: "insufficient_scope", content: "Sign in to pay." },
+        {
+          status: 403,
+          headers: {
+            "www-authenticate":
+              'Bearer error="insufficient_scope", scope="orders:read orders:write"',
+          },
+        },
+      ),
+    );
+    await expect(client.getOrder("ord_1")).rejects.toMatchObject({
+      error: "insufficient_scope",
+      scope: "orders:read orders:write",
+    });
+  });
+
+  it("takes the error from the challenge when the body names none", async () => {
+    // RFC 6750 servers often answer with the header alone and no body at all, which this read as
+    // `http_403`: a code no caller can branch on.
+    const client = clientFor(
+      () =>
+        new Response(null, {
+          status: 403,
+          headers: {
+            "www-authenticate": 'Bearer error="insufficient_scope", scope="payments:write"',
+          },
+        }),
+    );
+    await expect(client.getOrder("ord_1")).rejects.toMatchObject({
+      error: "insufficient_scope",
+      scope: "payments:write",
+    });
+  });
+
+  it("leaves the business's own code in place, and still reads the scopes", async () => {
+    // UCP's vocabulary is the business's to choose, so a code in the body still wins. The scopes
+    // are additional, not a replacement for it.
+    const client = clientFor(() =>
+      Response.json(
+        { code: "cart_expired" },
+        {
+          status: 403,
+          headers: { "www-authenticate": 'Bearer error="insufficient_scope", scope="orders:read"' },
+        },
+      ),
+    );
+    await expect(client.getOrder("ord_1")).rejects.toMatchObject({
+      error: "cart_expired",
+      scope: "orders:read",
+    });
+  });
+});
+
 describe("UCP without a Poppy Session", () => {
   it("calls the business directly and reads flat transport errors", async () => {
     const business = {
